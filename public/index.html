@@ -497,11 +497,12 @@
   }
 
   function isGroupUnhealthy(g, lagThreshold) {
-    const badState  = g.state !== 'STABLE' && !(g.state === 'EMPTY' && g.members === 0 && g.topics === 0);
-    const noMembers = g.state === 'STABLE' && g.members === 0;
-    const highLag   = g.consumerLag > lagThreshold;
+    const badState   = g.state !== 'STABLE' && !(g.state === 'EMPTY' && g.members === 0 && g.topics === 0);
+    const noMembers  = g.state === 'STABLE' && g.members === 0;
+    const highLag    = g.consumerLag > lagThreshold;
     const unbalanced = g.partitionUnbalanced === true;
-    return badState || noMembers || highLag || unbalanced;
+    const isEmpty    = g.state === 'EMPTY';
+    return badState || noMembers || highLag || unbalanced || isEmpty;
   }
 
   function lagClass(lag, threshold) {
@@ -602,6 +603,7 @@
       const lw = lagBarWidth(g.consumerLag, threshold);
       const reasons = [];
       if (g.state !== 'STABLE') reasons.push(g.state);
+      if (g.state === 'EMPTY') reasons.push('empty group');
       if (g.state === 'STABLE' && g.members === 0) reasons.push('no members');
       if (g.consumerLag > threshold) reasons.push(`lag: ${fmtNum(g.consumerLag)}`);
       if (g.partitionUnbalanced) reasons.push(`unbalanced partitions (${g.partitionBalance?.min ?? '?'}-${g.partitionBalance?.max ?? '?'} per member)`);
