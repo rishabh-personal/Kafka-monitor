@@ -1,0 +1,25 @@
+name: kafka-connector-monitor
+
+services:
+  - name: web
+    source_dir: /
+    dockerfile_path: Dockerfile
+    http_port: 3000
+    instance_size_slug: basic-xxs   # cheapest tier (~$5/mo)
+    instance_count: 1
+    health_check:
+      http_path: /health
+    envs:
+      - key: UI_PASSWORD
+        type: SECRET
+      - key: SESSION_SECRET
+        type: SECRET
+      - key: KAFKA_UI_URL
+        value: "https://kafka-ui.prod.zwing.in"
+      - key: CLUSTER_NAME
+        value: "central-zwing"
+      - key: SLACK_WEBHOOK
+        type: SECRET
+        # Set value in DigitalOcean Console: App → Settings → Environment Variables
+      - key: CHECK_INTERVAL
+        value: "*/15 * * * *"

@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Kafka Monitor</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0c0e14;
+      --bg-card: #161922;
+      --bg-elevated: #1c1f2a;
+      --border: #272a36;
+      --text: #e4e7ed;
+      --text-muted: #8b92a8;
+      --text-dim: #5c6378;
+      --accent: #6b9fff;
+      --accent-hover: #8bb3ff;
+      --success: #34d399;
+      --success-bg: rgba(52, 211, 153, 0.12);
+      --danger: #ef4444;
+      --danger-bg: rgba(239, 68, 68, 0.1);
+      --warning: #f59e0b;
+      --warning-bg: rgba(245, 158, 11, 0.1);
+      --radius: 12px;
+      --radius-sm: 8px;
+      --shadow: 0 4px 24px rgba(0,0,0,0.3);
+      --transition: 0.2s ease;
+    }
+
+    [data-theme="light"] {
+      --bg: #f5f6f9;
+      --bg-card: #ffffff;
+      --bg-elevated: #fafbfc;
+      --border: #e2e6ed;
+      --text: #1a1d26;
+      --text-muted: #5c6378;
+      --text-dim: #8b92a8;
+      --accent: #4d7ae8;
+      --accent-hover: #3b6ad4;
+      --success: #059669;
+      --success-bg: rgba(5, 150, 105, 0.08);
+      --danger: #dc2626;
+      --danger-bg: rgba(220, 38, 38, 0.08);
+      --warning: #d97706;
+      --warning-bg: rgba(217, 119, 6, 0.08);
+      --shadow: 0 2px 16px rgba(0,0,0,0.06);
+    }
+
+    body {
+      font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 28px;
+      transition: background var(--transition), color var(--transition);
+    }
+
+    @supports (font-variation-settings: normal) {
+      body { font-family: 'DM Sans', -apple-system, sans-serif; }
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 32px;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    header h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      letter-spacing: -0.02em;
+    }
+
+    .dot {
+      width: 12px; height: 12px;
+      border-radius: 50%;
+      display: inline-block;
+      animation: pulse 2s infinite;
+      box-shadow: 0 0 0 2px var(--bg-card);
+    }
+    .dot.ok      { background: var(--success); }
+    .dot.alert   { background: var(--danger); }
+    .dot.pending { background: var(--text-dim); animation: none; }
+    .dot.error   { background: var(--warning); }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; box-shadow: 0 0 0 2px var(--bg-card); }
+      50% { opacity: 0.6; }
+    }
+
+    .meta {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 8px 16px;
+      border-radius: var(--radius-sm);
+      font-size: 0.82rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all var(--transition);
+    }
+    .btn:hover { background: var(--border); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .theme-btn {
+      width: 40px;
+      height: 40px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.1rem;
+      border-radius: var(--radius-sm);
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      cursor: pointer;
+      transition: all var(--transition);
+    }
+    .theme-btn:hover { background: var(--border); }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(165px, 1fr));
+      gap: 16px;
+      margin-bottom: 32px;
+    }
+
+    .stat-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px 22px;
+      box-shadow: var(--shadow);
+      transition: all var(--transition);
+    }
+    .stat-card:hover {
+      border-color: var(--text-dim);
+    }
+
+    .stat-card .label {
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+
+    .stat-card .value {
+      font-size: 1.75rem;
+      font-weight: 700;
+      color: var(--text);
+      letter-spacing: -0.02em;
+    }
+
+    .stat-card .value.ok    { color: var(--success); }
+    .stat-card .value.alert { color: var(--danger); }
+    .stat-card .value.error { color: var(--warning); }
+
+    .section-title {
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      margin-bottom: 14px;
+      margin-top: 32px;
+    }
+
+    .cards-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+      gap: 16px;
+      margin-bottom: 12px;
+    }
+
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px 20px;
+      transition: all var(--transition);
+      box-shadow: var(--shadow);
+    }
+
+    .card:hover { border-color: var(--text-dim); }
+
+    .card.failed  { border-color: var(--danger); background: var(--danger-bg); }
+    .card.warning { border-color: var(--warning); background: var(--warning-bg); }
+
+    .card .name {
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 10px;
+      word-break: break-word;
+      letter-spacing: -0.01em;
+    }
+
+    .card .row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      margin-top: 6px;
+      gap: 12px;
+    }
+
+    .card .row span:last-child { color: var(--text); font-weight: 500; }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 0.7rem;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+    }
+
+    .badge.running  { background: var(--success-bg); color: var(--success); }
+    .badge.stable   { background: var(--success-bg); color: var(--success); }
+    .badge.failed   { background: var(--danger-bg); color: var(--danger); }
+    .badge.dead     { background: var(--danger-bg); color: var(--danger); }
+    .badge.degraded { background: var(--warning-bg); color: var(--warning); }
+    .badge.empty    { background: rgba(99, 102, 241, 0.12); color: #6366f1; }
+    .badge.other    { background: var(--bg-elevated); color: var(--text-muted); }
+
+    .reasons-text { color: var(--danger) !important; font-size: 0.72rem; }
+    .lag-value.ok { color: var(--text-muted); }
+    .lag-value.warning { color: var(--warning); }
+    .lag-value.danger { color: var(--danger); }
+
+    .lag-bar-wrap {
+      height: 5px;
+      background: var(--border);
+      border-radius: 999px;
+      margin-top: 10px;
+      overflow: hidden;
+    }
+    .lag-bar {
+      height: 100%;
+      border-radius: 999px;
+      transition: width 0.4s ease;
+    }
+    .lag-bar.ok      { background: var(--success); }
+    .lag-bar.warning { background: var(--warning); }
+    .lag-bar.danger  { background: var(--danger); }
+
+    .members-block { margin-top: 12px; }
+    .members-block .label { font-size: 0.7rem; color: var(--text-muted); margin-bottom: 8px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+    .member-row {
+      display: flex; align-items: center; justify-content: space-between;
+      font-size: 0.78rem; padding: 8px 12px; margin: 4px 0; background: var(--bg);
+      border-radius: var(--radius-sm); cursor: pointer; transition: all var(--transition);
+      border: 1px solid transparent;
+    }
+    .member-row:hover { background: var(--bg-elevated); border-color: var(--border); }
+    .member-row.expanded { border-color: var(--border); background: var(--bg-elevated); }
+    .member-row .cid { font-family: 'JetBrains Mono', 'SF Mono', monospace; font-size: 0.72rem; color: var(--text); max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
+    .member-row .partitions { color: var(--text-muted); font-size: 0.7rem; }
+    .member-row .chevron { color: var(--text-muted); font-size: 0.65rem; transition: transform var(--transition); }
+    .member-row.expanded .chevron { transform: rotate(90deg); }
+    .member-topics {
+      font-size: 0.72rem; color: var(--text-muted); padding: 10px 14px 12px 32px;
+      background: var(--bg); border-radius: 0 0 var(--radius-sm) var(--radius-sm); margin: -4px 0 4px 0;
+      display: none; border-left: 3px solid var(--accent); margin-left: 12px;
+    }
+    .member-row.expanded + .member-topics { display: block; }
+    .member-topics .topic-item { padding: 3px 0; font-family: 'JetBrains Mono', monospace; color: var(--text); }
+    .load-members-btn {
+      font-size: 0.78rem; color: var(--accent); background: none; border: none; cursor: pointer;
+      padding: 6px 0; margin-top: 6px; font-weight: 500;
+      transition: color var(--transition);
+    }
+    .load-members-btn:hover { color: var(--accent-hover); }
+
+    .alerts-list { display: flex; flex-direction: column; gap: 10px; }
+
+    .alert-item {
+      background: var(--danger-bg);
+      border: 1px solid rgba(239, 68, 68, 0.25);
+      border-radius: var(--radius-sm);
+      padding: 14px 18px;
+      font-size: 0.8rem;
+    }
+
+    .alert-item .time  { color: var(--text-muted); margin-bottom: 6px; }
+    .alert-item .names { color: var(--danger); font-weight: 600; }
+
+    .empty {
+      color: var(--text-dim);
+      font-size: 0.85rem;
+      padding: 24px 0;
+      text-align: center;
+    }
+
+    #refresh-indicator { font-size: 0.75rem; color: var(--text-dim); }
+
+    .spinner {
+      display: inline-block;
+      width: 14px; height: 14px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      vertical-align: middle;
+      margin-right: 6px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .search-bar {
+      width: 100%;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px 16px;
+      color: var(--text);
+      font-size: 0.85rem;
+      margin-bottom: 14px;
+      outline: none;
+      transition: border-color var(--transition);
+    }
+    .search-bar:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(107, 159, 255, 0.15); }
+    .search-bar::placeholder { color: var(--text-dim); }
+
+    .filter-row { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+    .filter-btn {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      padding: 6px 14px;
+      border-radius: 999px;
+      font-size: 0.76rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all var(--transition);
+    }
+    .filter-btn:hover { color: var(--text); }
+    .filter-btn.active { border-color: var(--accent); color: var(--accent); background: rgba(107, 159, 255, 0.08); }
+
+    .header-actions { display: flex; align-items: center; gap: 10px; }
+  </style>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+</head>
+<body>
+
+<header>
+  <h1>
+    <span class="dot pending" id="status-dot"></span>
+    Kafka Monitor
+  </h1>
+  <div class="meta">
+    <span id="cluster-label">—</span>
+    <span id="last-checked">Last checked: —</span>
+    <span id="refresh-indicator"></span>
+    <div class="header-actions">
+      <button class="theme-btn" id="theme-btn" onclick="toggleTheme()" title="Toggle dark/light mode" aria-label="Toggle theme">🌙</button>
+      <a href="/logout" class="btn" style="text-decoration:none;display:inline-flex;align-items:center" title="Sign out">Sign out</a>
+      <button class="btn" id="check-btn" onclick="triggerCheck()">▶ Check now</button>
+    </div>
+  </div>
+</header>
+
+<!-- Stats row -->
+<div class="stats">
+  <div class="stat-card">
+    <div class="label">Total Connectors</div>
+    <div class="value" id="stat-conn-total">—</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Healthy Connectors</div>
+    <div class="value ok" id="stat-conn-ok">—</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Failing Connectors</div>
+    <div class="value alert" id="stat-conn-fail">—</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Consumer Groups</div>
+    <div class="value" id="stat-cg-total">—</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Unhealthy Groups</div>
+    <div class="value alert" id="stat-cg-fail">—</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Checks Run</div>
+    <div class="value" id="stat-checks">—</div>
+  </div>
+</div>
+
+<!-- Connectors -->
+<div class="section-title">Connectors</div>
+<input class="search-bar" id="conn-search" placeholder="Search connectors…" oninput="renderConnectors()" />
+<div class="cards-grid" id="connectors-grid">
+  <div class="empty">Loading…</div>
+</div>
+
+<!-- Consumer Groups -->
+<div class="section-title">Consumer Groups</div>
+<div class="filter-row">
+  <button class="filter-btn active" id="cg-filter-all"      onclick="setCgFilter('all')">All</button>
+  <button class="filter-btn"        id="cg-filter-unhealthy" onclick="setCgFilter('unhealthy')">Unhealthy only</button>
+  <button class="filter-btn"        id="cg-filter-stable"    onclick="setCgFilter('stable')">Stable</button>
+</div>
+<input class="search-bar" id="cg-search" placeholder="Search consumer groups…" oninput="renderConsumerGroups()" />
+<div class="cards-grid" id="cg-grid">
+  <div class="empty">Loading…</div>
+</div>
+
+<!-- Alerts -->
+<div class="section-title">Recent Alerts</div>
+<div class="alerts-list" id="alerts-list">
+  <div class="empty">No alerts yet.</div>
+</div>
+
+<script>
+  let _data = null;
+  let _cgFilter = 'all';
+  let _memberDetailsCache = {};
+
+  function initTheme() {
+    const stored = localStorage.getItem('kafka-monitor-theme');
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const theme = stored || (prefersDark ? 'dark' : 'light');
+    document.documentElement.dataset.theme = theme === 'light' ? 'light' : '';
+    document.getElementById('theme-btn').textContent = theme === 'light' ? '☀️' : '🌙';
+  }
+
+  function toggleTheme() {
+    const isLight = document.documentElement.dataset.theme === 'light';
+    const next = isLight ? 'dark' : 'light';
+    document.documentElement.dataset.theme = next === 'light' ? 'light' : '';
+    document.getElementById('theme-btn').textContent = next === 'light' ? '☀️' : '🌙';
+    localStorage.setItem('kafka-monitor-theme', next);
+  }
+
+  async function loadMembers(groupId) {
+    const sel = `button[data-group-id="${String(groupId).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"]`;
+    const btn = document.querySelector(sel);
+    if (btn) { btn.textContent = 'Loading…'; btn.disabled = true; }
+    try {
+      const res = await fetch(`/api/consumer-groups/${encodeURIComponent(groupId)}/details`);
+      const json = await res.json();
+      if (json.memberAssignments) {
+        _memberDetailsCache[groupId] = json.memberAssignments;
+        renderConsumerGroups();
+      }
+    } catch (e) {
+      if (btn) btn.textContent = 'Load failed';
+    }
+    if (btn) { btn.disabled = false; btn.textContent = 'Load members'; }
+  }
+
+  function toggleMemberTopics(el) {
+    el.classList.toggle('expanded');
+  }
+
+  // ── helpers ────────────────────────────────────────────────────────────────
+  function badgeConnector(state) {
+    if (!state) return 'other';
+    if (state === 'RUNNING') return 'running';
+    if (state.includes('FAIL')) return 'failed';
+    if (state === 'DEGRADED') return 'degraded';
+    return 'other';
+  }
+
+  function badgeGroup(state) {
+    if (!state) return 'other';
+    const s = state.toUpperCase();
+    if (s === 'STABLE') return 'stable';
+    if (s === 'DEAD')   return 'dead';
+    if (s === 'EMPTY')  return 'empty';
+    return 'other';
+  }
+
+  function isGroupUnhealthy(g, lagThreshold) {
+    const badState  = g.state !== 'STABLE' && !(g.state === 'EMPTY' && g.members === 0 && g.topics === 0);
+    const noMembers = g.state === 'STABLE' && g.members === 0;
+    const highLag   = g.consumerLag > lagThreshold;
+    const unbalanced = g.partitionUnbalanced === true;
+    return badState || noMembers || highLag || unbalanced;
+  }
+
+  function lagClass(lag, threshold) {
+    if (lag <= 0) return 'ok';
+    if (lag > threshold) return 'danger';
+    if (lag > threshold * 0.5) return 'warning';
+    return 'ok';
+  }
+
+  function lagBarWidth(lag, threshold) {
+    if (!lag || lag <= 0) return 0;
+    return Math.min(100, (lag / (threshold * 1.5)) * 100);
+  }
+
+  function timeAgo(iso) {
+    if (!iso) return '—';
+    const diff = Math.floor((Date.now() - new Date(iso)) / 1000);
+    if (diff < 5)    return 'just now';
+    if (diff < 60)   return `${diff}s ago`;
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    return new Date(iso).toLocaleTimeString();
+  }
+
+  function fmtNum(n) {
+    if (n == null) return '—';
+    return n.toLocaleString();
+  }
+
+  function attrEsc(s) {
+    return String(s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  // ── render connectors ──────────────────────────────────────────────────────
+  function renderConnectors() {
+    if (!_data) return;
+    const q = document.getElementById('conn-search').value.toLowerCase();
+    const grid = document.getElementById('connectors-grid');
+
+    let list = _data.connectors;
+    if (q) list = list.filter(c => c.name.toLowerCase().includes(q));
+    if (!list.length) { grid.innerHTML = '<div class="empty">No connectors match.</div>'; return; }
+
+    const sorted = [...list].sort((a, b) => {
+      const af = a.state !== 'RUNNING' || a.failedTasks > 0;
+      const bf = b.state !== 'RUNNING' || b.failedTasks > 0;
+      return bf - af;
+    });
+
+    grid.innerHTML = sorted.map(c => {
+      const isFailed = c.state !== 'RUNNING' || c.failedTasks > 0;
+      return `
+        <div class="card ${isFailed ? 'failed' : ''}">
+          <div class="name">${c.name}</div>
+          <div class="row">
+            <span>Status</span>
+            <span><span class="badge ${badgeConnector(c.state)}">${c.state || 'UNKNOWN'}</span></span>
+          </div>
+          <div class="row"><span>Type</span><span>${c.type || '—'}</span></div>
+          <div class="row"><span>Connect</span><span>${c.connect || '—'}</span></div>
+          <div class="row"><span>Tasks</span><span>${c.tasksCount ?? '—'} total / ${c.failedTasks ?? 0} failed</span></div>
+        </div>`;
+    }).join('');
+  }
+
+  // ── render consumer groups ─────────────────────────────────────────────────
+  function setCgFilter(f) {
+    _cgFilter = f;
+    ['all', 'unhealthy', 'stable'].forEach(x => {
+      document.getElementById(`cg-filter-${x}`).classList.toggle('active', x === f);
+    });
+    renderConsumerGroups();
+  }
+
+  function renderConsumerGroups() {
+    if (!_data) return;
+    const q         = document.getElementById('cg-search').value.toLowerCase();
+    const threshold = _data.lagThreshold || 10000;
+    const grid      = document.getElementById('cg-grid');
+
+    let list = _data.consumerGroups || [];
+    if (q) list = list.filter(g => g.groupId.toLowerCase().includes(q));
+    if (_cgFilter === 'unhealthy') list = list.filter(g => isGroupUnhealthy(g, threshold));
+    if (_cgFilter === 'stable')    list = list.filter(g => g.state === 'STABLE');
+
+    if (!list.length) { grid.innerHTML = '<div class="empty">No groups match.</div>'; return; }
+
+    // Sort: unhealthy first, then by lag desc
+    const sorted = [...list].sort((a, b) => {
+      const au = isGroupUnhealthy(a, threshold);
+      const bu = isGroupUnhealthy(b, threshold);
+      if (au !== bu) return bu - au;
+      return (b.consumerLag || 0) - (a.consumerLag || 0);
+    });
+
+    grid.innerHTML = sorted.map(g => {
+      const unhealthy = isGroupUnhealthy(g, threshold);
+      const lc = lagClass(g.consumerLag, threshold);
+      const lw = lagBarWidth(g.consumerLag, threshold);
+      const reasons = [];
+      if (g.state !== 'STABLE') reasons.push(g.state);
+      if (g.state === 'STABLE' && g.members === 0) reasons.push('no members');
+      if (g.consumerLag > threshold) reasons.push(`lag: ${fmtNum(g.consumerLag)}`);
+      if (g.partitionUnbalanced) reasons.push(`unbalanced partitions (${g.partitionBalance?.min ?? '?'}-${g.partitionBalance?.max ?? '?'} per member)`);
+
+      const members = g.memberAssignments || _memberDetailsCache[g.groupId];
+      const membersHtml = members && members.length ? members.map(m => {
+        const topicsList = (m.topics || []).map(t => `<div class="topic-item">${t.topic} (p${t.partition})</div>`).join('');
+        return `
+          <div class="member-row" onclick="toggleMemberTopics(this)">
+            <span class="cid" title="${m.consumerId}">${m.consumerId}</span>
+            <span class="partitions">${m.topics?.length || 0} partitions</span>
+            <span class="chevron">▶</span>
+          </div>
+          <div class="member-topics">${topicsList || '<span class="topic-item">—</span>'}</div>`;
+      }).join('') : '';
+
+      const membersBlock = members && members.length
+        ? `<div class="members-block"><div class="label">Members (click to see topics)</div>${membersHtml}</div>`
+        : (g.members > 0
+          ? `<button class="load-members-btn" data-load-members="${attrEsc(g.groupId)}" data-group-id="${attrEsc(g.groupId)}" onclick="loadMembers(this.dataset.groupId)">▶ Load member list</button>`
+          : '');
+
+      return `
+        <div class="card ${unhealthy ? (g.state === 'DEAD' ? 'failed' : 'warning') : ''}">
+          <div class="name">${g.groupId}</div>
+          <div class="row">
+            <span>State</span>
+            <span><span class="badge ${badgeGroup(g.state)}">${g.state || 'UNKNOWN'}</span>${reasons.length ? ' <span class="reasons-text">' + reasons.join(', ') + '</span>' : ''}</span>
+          </div>
+          <div class="row"><span>Members</span><span>${g.members ?? '—'}</span></div>
+          <div class="row"><span>Topics</span><span>${g.topics ?? '—'}</span></div>
+          ${g.partitionBalance ? `<div class="row"><span>Partition Balance</span><span>${g.partitionBalance.balanced ? '✓ even' : `⚠ ${g.partitionBalance.min}-${g.partitionBalance.max} per member`}</span></div>` : ''}
+          ${membersBlock}
+          <div class="row"><span>Consumer Lag</span><span class="lag-value ${lc}">${fmtNum(g.consumerLag)}</span></div>
+          <div class="lag-bar-wrap"><div class="lag-bar ${lc}" style="width:${lw}%"></div></div>
+        </div>`;
+    }).join('');
+  }
+
+  // ── main render ────────────────────────────────────────────────────────────
+  function render(data) {
+    _data = data;
+    const threshold = data.lagThreshold || 10000;
+
+    // Status dot
+    document.getElementById('status-dot').className = `dot ${data.status || 'pending'}`;
+    document.getElementById('cluster-label').textContent = `cluster: ${data.cluster}`;
+    document.getElementById('last-checked').textContent  = `Last checked: ${timeAgo(data.lastChecked)}`;
+
+    // Connector stats
+    const connTotal   = data.connectors.length;
+    const connFailing = data.connectors.filter(c => c.state !== 'RUNNING' || c.failedTasks > 0).length;
+    document.getElementById('stat-conn-total').textContent = connTotal;
+    document.getElementById('stat-conn-ok').textContent    = connTotal - connFailing;
+    document.getElementById('stat-conn-fail').textContent  = connFailing;
+
+    // Consumer stats
+    const cgTotal     = (data.consumerGroups || []).length;
+    const cgUnhealthy = (data.consumerGroups || []).filter(g => isGroupUnhealthy(g, threshold)).length;
+    document.getElementById('stat-cg-total').textContent = cgTotal;
+    document.getElementById('stat-cg-fail').textContent  = cgUnhealthy;
+    document.getElementById('stat-checks').textContent   = data.checkCount;
+
+    renderConnectors();
+    renderConsumerGroups();
+
+    // Alerts
+    const list = document.getElementById('alerts-list');
+    if (!data.alerts || !data.alerts.length) {
+      list.innerHTML = '<div class="empty">No alerts fired yet.</div>';
+    } else {
+      list.innerHTML = data.alerts.map(a => `
+        <div class="alert-item">
+          <div class="time">🕐 ${new Date(a.time).toLocaleString()}
+            ${a.connectorCount ? ` — ${a.connectorCount} connector(s)` : ''}
+            ${a.consumerCount  ? ` — ${a.consumerCount} consumer group(s)` : ''}
+          </div>
+          <div class="names">${(a.names || []).join(', ')}</div>
+        </div>`).join('');
+    }
+  }
+
+  // ── load & poll ────────────────────────────────────────────────────────────
+  async function load() {
+    const ind = document.getElementById('refresh-indicator');
+    ind.innerHTML = '<span class="spinner"></span> refreshing…';
+    try {
+      const res = await fetch('/api/status');
+      if (res.status === 401) { window.location.href = '/login'; return; }
+      const data = await res.json();
+      render(data);
+      ind.textContent = '';
+    } catch (e) {
+      ind.textContent = '⚠ fetch error';
+    }
+  }
+
+  async function triggerCheck() {
+    const btn = document.getElementById('check-btn');
+    btn.disabled = true;
+    btn.textContent = '⏳ Checking…';
+    try {
+      await fetch('/api/check', { method: 'POST' });
+      await load();
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '▶ Check now';
+    }
+  }
+
+  initTheme();
+  load();
+  setInterval(load, 30000);
+</script>
+</body>
+</html>
