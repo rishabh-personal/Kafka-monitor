@@ -286,7 +286,14 @@
       display: none; border-left: 3px solid var(--accent); margin-left: 12px;
     }
     .member-row.expanded + .member-topics { display: block; }
-    .member-topics .topic-item { padding: 3px 0; font-family: 'JetBrains Mono', monospace; color: var(--text); }
+    .member-topics table { width: 100%; border-collapse: collapse; font-size: 0.72rem; font-family: 'JetBrains Mono', monospace; }
+    .member-topics th, .member-topics td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border); }
+    .member-topics th { color: var(--text-muted); font-weight: 600; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    .member-topics td { color: var(--text); }
+    .member-topics tr:last-child td { border-bottom: none; }
+    .member-topics .lag-cell { text-align: right; font-variant-numeric: tabular-nums; }
+    .member-topics .lag-high { color: var(--danger); font-weight: 500; }
+    .member-topics .topic-item { color: var(--text-muted); font-style: italic; }
     .load-members-btn {
       font-size: 0.78rem; color: var(--accent); background: none; border: none; cursor: pointer;
       padding: 6px 0; margin-top: 6px; font-weight: 500;
@@ -294,6 +301,34 @@
     }
     .load-members-btn:hover { color: var(--accent-hover); }
 
+    .ack-row {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border);
+      font-size: 0.75rem;
+    }
+    .ack-label { color: var(--text-muted); }
+    .ack-btn {
+      padding: 4px 10px; border-radius: 6px; font-size: 0.7rem; font-weight: 500;
+      background: var(--bg-elevated); border: 1px solid var(--border); color: var(--accent);
+      cursor: pointer; transition: all var(--transition);
+    }
+    .ack-btn:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .ack-badge { color: var(--success); font-weight: 500; }
+
+    .alerts-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+    .alerts-header .section-title { margin: 0; margin-top: 32px; }
+    .clear-all-btn {
+      font-size: 0.75rem; color: var(--text-muted); background: none; border: none; cursor: pointer;
+      padding: 4px 8px; font-weight: 500;
+    }
+    .clear-all-btn:hover { color: var(--danger); }
+    .alert-item { position: relative; padding-right: 32px; }
+    .alert-clear-btn {
+      position: absolute; top: 12px; right: 12px; width: 24px; height: 24px; padding: 0;
+      border: none; background: transparent; color: var(--text-muted); cursor: pointer;
+      border-radius: 4px; font-size: 1rem; line-height: 1; display: flex; align-items: center; justify-content: center;
+    }
+    .alert-clear-btn:hover { background: var(--danger-bg); color: var(--danger); }
     .alerts-list { display: flex; flex-direction: column; gap: 10px; }
 
     .alert-item {
@@ -431,7 +466,10 @@
 </div>
 
 <!-- Alerts -->
-<div class="section-title">Recent Alerts</div>
+<div class="alerts-header">
+  <span class="section-title">Recent Alerts</span>
+  <button class="clear-all-btn" id="clear-all-alerts" onclick="clearAllAlerts()" style="display:none">Clear all</button>
+</div>
 <div class="alerts-list" id="alerts-list">
   <div class="empty">No alerts yet.</div>
 </div>
@@ -476,6 +514,41 @@
 
   function toggleMemberTopics(el) {
     el.classList.toggle('expanded');
+  }
+
+  async function clearAlert(index) {
+    try {
+      await fetch(`/api/alerts/${index}`, { method: 'DELETE' });
+      await load();
+    } catch (e) { console.error('Clear failed:', e); }
+  }
+
+  async function clearAllAlerts() {
+    try {
+      await fetch('/api/alerts', { method: 'DELETE' });
+      await load();
+    } catch (e) { console.error('Clear failed:', e); }
+  }
+
+  async function ack(type, id, hours) {
+    try {
+      await fetch('/api/ack', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type, id, hours })
+      });
+      await load();
+    } catch (e) {
+      console.error('Ack failed:', e);
+    }
+  }
+
+  function ackUntil(type, id) {
+    const acks = _data?.acks;
+    if (!acks) return null;
+    const list = type === 'connector' ? acks.connectors : acks.consumers;
+    const e = list.find(x => x.id === id);
+    return e ? e.until : null;
   }
 
   // ── helpers ────────────────────────────────────────────────────────────────
@@ -553,6 +626,16 @@
 
     grid.innerHTML = sorted.map(c => {
       const isFailed = c.state !== 'RUNNING' || c.failedTasks > 0;
+      const until = ackUntil('connector', c.name);
+      const ackBlock = isFailed ? `
+          <div class="ack-row">
+            ${c.acknowledged ? `<span class="ack-badge">Acked until ${until ? new Date(until).toLocaleString() : '—'}</span>` : `
+            <span class="ack-label">Pause alerts:</span>
+            <button class="ack-btn" data-ack-type="connector" data-ack-id="${attrEsc(c.name)}" onclick="ack(this.dataset.ackType,this.dataset.ackId,1)">1h</button>
+            <button class="ack-btn" data-ack-type="connector" data-ack-id="${attrEsc(c.name)}" onclick="ack(this.dataset.ackType,this.dataset.ackId,2)">2h</button>
+            <button class="ack-btn" data-ack-type="connector" data-ack-id="${attrEsc(c.name)}" onclick="ack(this.dataset.ackType,this.dataset.ackId,4)">4h</button>
+            <button class="ack-btn" data-ack-type="connector" data-ack-id="${attrEsc(c.name)}" onclick="ack(this.dataset.ackType,this.dataset.ackId,12)">12h</button>`}
+          </div>` : '';
       return `
         <div class="card ${isFailed ? 'failed' : ''}">
           <div class="name">${c.name}</div>
@@ -563,6 +646,7 @@
           <div class="row"><span>Type</span><span>${c.type || '—'}</span></div>
           <div class="row"><span>Connect</span><span>${c.connect || '—'}</span></div>
           <div class="row"><span>Tasks</span><span>${c.tasksCount ?? '—'} total / ${c.failedTasks ?? 0} failed</span></div>
+          ${ackBlock}
         </div>`;
     }).join('');
   }
@@ -610,14 +694,22 @@
 
       const members = g.memberAssignments || _memberDetailsCache[g.groupId];
       const membersHtml = members && members.length ? members.map(m => {
-        const topicsList = (m.topics || []).map(t => `<div class="topic-item">${t.topic} (p${t.partition})</div>`).join('');
+        const topicsRows = (m.topics || []).map(t => {
+          const lagCell = t.lag != null ? fmtNum(t.lag) : '—';
+          const lagClass = t.lag > threshold ? ' lag-high' : '';
+          return `<tr><td>${attrEsc(t.topic)}</td><td>${t.partition}</td><td class="lag-cell ${lagClass}">${lagCell}</td></tr>`;
+        }).join('');
+        const topicsTable = topicsRows
+          ? `<table><thead><tr><th>Topic</th><th>Partition</th><th>Lag</th></tr></thead><tbody>${topicsRows}</tbody></table>`
+          : '<span class="topic-item">—</span>';
+        const memberLagStr = m.memberLag != null && m.memberLag > 0 ? ` • ${fmtNum(m.memberLag)} lag` : '';
         return `
           <div class="member-row" onclick="toggleMemberTopics(this)">
             <span class="cid" title="${m.consumerId}">${m.consumerId}</span>
-            <span class="partitions">${m.topics?.length || 0} partitions</span>
+            <span class="partitions">${m.topics?.length || 0} partitions${memberLagStr}</span>
             <span class="chevron">▶</span>
           </div>
-          <div class="member-topics">${topicsList || '<span class="topic-item">—</span>'}</div>`;
+          <div class="member-topics">${topicsTable}</div>`;
       }).join('') : '';
 
       const membersBlock = members && members.length
@@ -639,6 +731,15 @@
           ${membersBlock}
           <div class="row"><span>Consumer Lag</span><span class="lag-value ${lc}">${fmtNum(g.consumerLag)}</span></div>
           <div class="lag-bar-wrap"><div class="lag-bar ${lc}" style="width:${lw}%"></div></div>
+          ${unhealthy ? `
+          <div class="ack-row">
+            ${g.acknowledged ? `<span class="ack-badge">Acked until ${(ackUntil('consumer', g.groupId) ? new Date(ackUntil('consumer', g.groupId)).toLocaleString() : '—')}</span>` : `
+            <span class="ack-label">Pause alerts:</span>
+            <button class="ack-btn" data-ack-type="consumer" data-ack-id="${attrEsc(g.groupId)}" onclick="ack(this.dataset.ackType,this.dataset.ackId,1)">1h</button>
+            <button class="ack-btn" data-ack-type="consumer" data-ack-id="${attrEsc(g.groupId)}" onclick="ack(this.dataset.ackType,this.dataset.ackId,2)">2h</button>
+            <button class="ack-btn" data-ack-type="consumer" data-ack-id="${attrEsc(g.groupId)}" onclick="ack(this.dataset.ackType,this.dataset.ackId,4)">4h</button>
+            <button class="ack-btn" data-ack-type="consumer" data-ack-id="${attrEsc(g.groupId)}" onclick="ack(this.dataset.ackType,this.dataset.ackId,12)">12h</button>`}
+          </div>` : ''}
         </div>`;
     }).join('');
   }
@@ -672,11 +773,15 @@
 
     // Alerts
     const list = document.getElementById('alerts-list');
+    const clearAllBtn = document.getElementById('clear-all-alerts');
     if (!data.alerts || !data.alerts.length) {
       list.innerHTML = '<div class="empty">No alerts fired yet.</div>';
+      if (clearAllBtn) clearAllBtn.style.display = 'none';
     } else {
-      list.innerHTML = data.alerts.map(a => `
+      if (clearAllBtn) clearAllBtn.style.display = 'inline-block';
+      list.innerHTML = data.alerts.map((a, i) => `
         <div class="alert-item">
+          <button class="alert-clear-btn" onclick="clearAlert(${i})" title="Clear this alert">×</button>
           <div class="time">🕐 ${new Date(a.time).toLocaleString()}
             ${a.connectorCount ? ` — ${a.connectorCount} connector(s)` : ''}
             ${a.consumerCount  ? ` — ${a.consumerCount} consumer group(s)` : ''}

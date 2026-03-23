@@ -21,5 +21,7 @@ services:
       - key: SLACK_WEBHOOK
         type: SECRET
         # Set value in DigitalOcean Console: App → Settings → Environment Variables
+      - key: APP_URL
+        value: "https://your-app.ondigitalocean.app"
       - key: CHECK_INTERVAL
         value: "*/15 * * * *"
