@@ -1,10 +1,11 @@
 require('dotenv').config();
 
+const crypto = require('crypto');
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 const cron = require('node-cron');
 const fetch = require('node-fetch');
-const path = require('path');
-const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -20,6 +21,71 @@ const KAFKA_UI_USER   = process.env.KAFKA_UI_USER   || 'admin';
 const KAFKA_UI_PASS   = process.env.KAFKA_UI_PASS   || 'prodkafka@admin@123';
 const LAG_THRESHOLD   = parseInt(process.env.LAG_THRESHOLD || '10000', 10); // alert if lag > this
 const CHECK_BALANCE   = process.env.CHECK_PARTITION_BALANCE !== 'false'; // verify partition distribution across members
+const APP_URL         = process.env.APP_URL || ''; // public URL for ack links in Slack (e.g. https://your-app.ondigitalocean.app)
+
+// ── Acknowledgement store (pause alerts for 1, 2, 4 or 12 hours) ─────────────
+const ACKS_FILE = path.join(__dirname, 'data', 'acks.json');
+
+function ensureDataDir() {
+  const dir = path.dirname(ACKS_FILE);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
+function loadAcks() {
+  try {
+    ensureDataDir();
+    const raw = fs.readFileSync(ACKS_FILE, 'utf8');
+    return JSON.parse(raw);
+  } catch {
+    return { connectors: {}, consumers: {} };
+  }
+}
+
+function saveAcks(acks) {
+  try {
+    ensureDataDir();
+    fs.writeFileSync(ACKS_FILE, JSON.stringify(acks, null, 2), 'utf8');
+  } catch (err) {
+    console.warn('[ACK] Could not persist acks:', err.message);
+  }
+}
+
+function addAck(type, id, hours) {
+  const acks = loadAcks();
+  const until = Date.now() + hours * 60 * 60 * 1000;
+  if (type === 'connector') acks.connectors[id] = { until };
+  else acks.consumers[id] = { until };
+  saveAcks(acks);
+}
+
+function isAcknowledged(type, id) {
+  const acks = loadAcks();
+  const map = type === 'connector' ? acks.connectors : acks.consumers;
+  const entry = map[id];
+  if (!entry) return false;
+  if (Date.now() > entry.until) {
+    delete map[id];
+    saveAcks(acks);
+    return false;
+  }
+  return true;
+}
+
+function getAcks() {
+  const acks = loadAcks();
+  const now = Date.now();
+  const active = { connectors: [], consumers: [] };
+  for (const [id, e] of Object.entries(acks.connectors)) {
+    if (now < e.until) active.connectors.push({ id, until: e.until });
+    else delete acks.connectors[id];
+  }
+  for (const [id, e] of Object.entries(acks.consumers)) {
+    if (now < e.until) active.consumers.push({ id, until: e.until });
+    else delete acks.consumers[id];
+  }
+  if (Object.keys(acks.connectors).length !== active.connectors.length || Object.keys(acks.consumers).length !== active.consumers.length) saveAcks(acks);
+  return active;
+}
 
 // ── UI Auth (password protection) ───────────────────────────────────────────
 const AUTH_COOKIE = 'kafka_monitor_auth';
@@ -52,10 +118,12 @@ function requireAuth(req, res, next) {
   if (req.xhr || req.headers['accept']?.includes('application/json')) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
-  return res.redirect('/login');
+  const redirect = encodeURIComponent(req.originalUrl || req.url);
+  return res.redirect(`/login?redirect=${redirect}`);
 }
 
-function getLoginPage(invalid) {
+function getLoginPage(invalid, redirect) {
+  const redirectInput = redirect ? `<input type="hidden" name="redirect" value="${redirect.replace(/"/g, '&quot;')}" />` : '';
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -100,6 +168,7 @@ function getLoginPage(invalid) {
     <p class="sub">Enter password to continue</p>
     ${invalid ? '<p class="err">Invalid password. Please try again.</p>' : ''}
     <form method="post" action="/login">
+      ${redirectInput}
       <label for="pw">Password</label>
       <input type="password" id="pw" name="password" placeholder="••••••••" required autofocus />
       <button type="submit">Sign in</button>
@@ -194,16 +263,18 @@ async function fetchConsumerGroupDetails(groupId) {
   }
 }
 
-// Build member list with topic-partition assignments from consumer group details
+// Build member list with topic-partition assignments and lag from consumer group details
 function buildMemberAssignments(details) {
   const partitions = details?.partitions || [];
   const byMember = {};
   for (const p of partitions) {
     const cid = p.consumerId ?? '(unknown)';
+    const lag = p.consumerLag != null ? p.consumerLag : 0;
     if (!byMember[cid]) {
-      byMember[cid] = { consumerId: cid, host: p.host ?? '-', topics: [] };
+      byMember[cid] = { consumerId: cid, host: p.host ?? '-', topics: [], memberLag: 0 };
     }
-    byMember[cid].topics.push({ topic: p.topic, partition: p.partition });
+    byMember[cid].topics.push({ topic: p.topic, partition: p.partition, lag });
+    byMember[cid].memberLag += lag;
   }
   return Object.values(byMember);
 }
@@ -232,6 +303,11 @@ function pad(str, len) {
   return String(str).padEnd(len).slice(0, len);
 }
 
+function ackUrl(type, id, hours) {
+  if (!APP_URL) return null;
+  return `${APP_URL.replace(/\/$/, '')}/ack?type=${type}&id=${encodeURIComponent(id)}&hours=${hours}`;
+}
+
 async function sendSlackAlert(failedConnectors, totalConnectors, unhealthyGroups) {
   if (!SLACK_WEBHOOK) return;
   const now = new Date().toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
@@ -253,6 +329,11 @@ async function sendSlackAlert(failedConnectors, totalConnectors, unhealthyGroups
       lines.push(`| ${pad(name, cols.name)} | ${pad(status, cols.status)} | ${pad(String(c.failed_tasks_count ?? 0), cols.failed)} | ${pad(connect, cols.connect)} |`);
     }
     lines.push('```');
+    const connAckParts = failedConnectors.map(c => {
+      const u1 = ackUrl('connector', c.name, 1), u2 = ackUrl('connector', c.name, 2), u4 = ackUrl('connector', c.name, 4), u12 = ackUrl('connector', c.name, 12);
+      return u1 && u2 ? `<${u1}|1h> <${u2}|2h> <${u4}|4h> <${u12}|12h>` : '';
+    }).filter(Boolean);
+    if (connAckParts.length) lines.push(`_Pause alerts:_ ${connAckParts.join(' | ')}`);
     lines.push(`🔗 <${KAFKA_UI_URL}/ui/clusters/${CLUSTER_NAME}/connectors|View Connectors>`);
   }
 
@@ -277,6 +358,11 @@ async function sendSlackAlert(failedConnectors, totalConnectors, unhealthyGroups
       lines.push(`| ${pad(groupId, cols.groupId)} | ${pad(state, cols.state)} | ${pad(members, cols.members)} | ${pad(lag, cols.lag)} | ${pad(balance, cols.balance)} |`);
     }
     lines.push('```');
+    const ackParts = unhealthyGroups.map(g => {
+      const u1 = ackUrl('consumer', g.groupId, 1), u2 = ackUrl('consumer', g.groupId, 2), u4 = ackUrl('consumer', g.groupId, 4), u12 = ackUrl('consumer', g.groupId, 12);
+      return u1 && u2 ? `<${u1}|1h> <${u2}|2h> <${u4}|4h> <${u12}|12h>` : '';
+    }).filter(Boolean);
+    if (ackParts.length) lines.push(`_Pause alerts:_ ${ackParts.join(' | ')}`);
     lines.push(`🔗 <${KAFKA_UI_URL}/ui/clusters/${CLUSTER_NAME}/consumer-groups|View Consumer Groups>`);
   }
 
@@ -334,8 +420,11 @@ async function runCheck() {
     state.consumerGroups = consumerGroups;
     state.status        = (failedConnectors.length > 0 || unhealthyGroups.length > 0) ? 'alert' : 'ok';
 
-    if (failedConnectors.length > 0 || unhealthyGroups.length > 0) {
-      await sendSlackAlert(failedConnectors, connectors.length, unhealthyGroups);
+    const toAlertConns = failedConnectors.filter(c => !isAcknowledged('connector', c.name));
+    const toAlertCons  = unhealthyGroups.filter(g => !isAcknowledged('consumer', g.groupId));
+
+    if (toAlertConns.length > 0 || toAlertCons.length > 0) {
+      await sendSlackAlert(toAlertConns, connectors.length, toAlertCons);
       const event = {
         time: state.lastChecked,
         connectorCount: failedConnectors.length,
@@ -367,12 +456,14 @@ app.use(express.urlencoded({ extended: true }));
 app.get('/login', (req, res) => {
   if (!UI_PASSWORD) return res.redirect('/');
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.send(getLoginPage());
+  res.send(getLoginPage(false, req.query.redirect));
 });
 
 app.post('/login', (req, res) => {
   if (!UI_PASSWORD) return res.redirect('/');
   const pwd = req.body?.password;
+  const r = req.body?.redirect;
+  const redirectTo = (r && r.startsWith('/') && !r.includes('//')) ? r : '/';
   if (pwd === UI_PASSWORD) {
     const token = signCookie('ok');
     const isProd = process.env.NODE_ENV === 'production';
@@ -383,10 +474,10 @@ app.post('/login', (req, res) => {
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
       path: '/'
     });
-    return res.redirect('/');
+    return res.redirect(redirectTo);
   }
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.status(401).send(getLoginPage(true));
+  res.status(401).send(getLoginPage(true, req.body?.redirect));
 });
 
 app.get('/logout', (req, res) => {
@@ -394,7 +485,23 @@ app.get('/logout', (req, res) => {
   res.redirect('/login');
 });
 
-// Protected routes
+// Acknowledgement from Slack link (GET) or UI (POST)
+app.get('/ack', (req, res, next) => {
+  if (req.path === '/health') return next();
+  requireAuth(req, res, () => {
+    const type = req.query.type, id = req.query.id, hours = parseInt(req.query.hours, 10);
+    const validHours = [1, 2, 4, 12];
+    if (type && id && validHours.includes(hours)) {
+      addAck(type, id, hours);
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Acknowledged</title></head><body style="font-family:sans-serif;padding:40px;text-align:center"><h1>✓ Acknowledged</h1><p>Alerts for ${type === 'connector' ? 'connector' : 'consumer group'} <strong>${id}</strong> paused for ${hours} hour(s).</p><p><a href="/">Back to dashboard</a></p></body></html>`);
+    } else {
+      res.status(400).send('Invalid ack params. Need type, id, and hours (1, 2, 4 or 12).');
+    }
+  });
+});
+
+// Protected routes (skip /health and /ack which has its own auth)
 app.use((req, res, next) => {
   if (req.path === '/health') return next();
   requireAuth(req, res, next);
@@ -404,6 +511,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // JSON API — used by the dashboard
 app.get('/api/status', (req, res) => {
+  const acks = getAcks();
   res.json({
     lastChecked:    state.lastChecked,
     checkCount:     state.checkCount,
@@ -411,6 +519,7 @@ app.get('/api/status', (req, res) => {
     cluster:        CLUSTER_NAME,
     kafkaUiUrl:     KAFKA_UI_URL,
     lagThreshold:   LAG_THRESHOLD,
+    acks,
     connectors: state.connectors.map(c => ({
       name:        c.name,
       connect:     c.connect,
@@ -418,7 +527,8 @@ app.get('/api/status', (req, res) => {
       state:       c.status?.state,
       tasksCount:  c.tasks_count,
       failedTasks: c.failed_tasks_count,
-      workerId:    c.status?.worker_id
+      workerId:    c.status?.worker_id,
+      acknowledged: isAcknowledged('connector', c.name)
     })),
     consumerGroups: state.consumerGroups.map(g => ({
       groupId:         g.groupId,
@@ -428,7 +538,8 @@ app.get('/api/status', (req, res) => {
       consumerLag:     g.consumerLag,
       partitionBalance: g.partitionBalance,
       partitionUnbalanced: g.partitionUnbalanced,
-      memberAssignments: g.memberAssignments
+      memberAssignments: g.memberAssignments,
+      acknowledged: isAcknowledged('consumer', g.groupId)
     })),
     alerts: state.alerts
   });
@@ -444,6 +555,40 @@ app.get('/api/consumer-groups/:groupId/details', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// Acknowledge alert (pause for 1, 2, 4 or 12 hours)
+app.post('/api/ack', (req, res) => {
+  const { type, id, hours } = req.body || {};
+  const validHours = [1, 2, 4, 12];
+  if (!type || !id || !validHours.includes(Number(hours))) {
+    return res.status(400).json({ error: 'Need type (connector|consumer), id, and hours (1|2|4|12)' });
+  }
+  if (type !== 'connector' && type !== 'consumer') {
+    return res.status(400).json({ error: 'type must be connector or consumer' });
+  }
+  addAck(type, id, Number(hours));
+  res.json({ ok: true, until: Date.now() + Number(hours) * 60 * 60 * 1000 });
+});
+
+// List active acknowledgements
+app.get('/api/acks', (req, res) => {
+  res.json(getAcks());
+});
+
+// Clear recent alerts
+app.delete('/api/alerts', (req, res) => {
+  state.alerts = [];
+  res.json({ ok: true });
+});
+
+app.delete('/api/alerts/:index', (req, res) => {
+  const idx = parseInt(req.params.index, 10);
+  if (isNaN(idx) || idx < 0 || idx >= state.alerts.length) {
+    return res.status(400).json({ error: 'Invalid alert index' });
+  }
+  state.alerts.splice(idx, 1);
+  res.json({ ok: true });
 });
 
 // Manual trigger endpoint
