@@ -223,10 +223,18 @@ let state = {
   lastChecked: null,
   connectors: [],
   consumerGroups: [],
+  brokers: null,       // [{ id, host, port, partitions, ... }] or null if unreachable
+  brokerStatus: 'pending',  // ok | unreachable
+  brokerError: null,
   alerts: [],          // last 20 alert events
   checkCount: 0,
   status: 'pending'    // pending | ok | alert | error
 };
+
+// ── Core: fetch brokers (detect if cluster/brokers are down) ───────────────
+async function fetchBrokers() {
+  return apiFetch(`${KAFKA_UI_URL}/api/clusters/${CLUSTER_NAME}/brokers`);
+}
 
 // ── Core: fetch connectors ─────────────────────────────────────────────────
 async function fetchConnectors() {
@@ -308,10 +316,18 @@ function ackUrl(type, id, hours) {
   return `${APP_URL.replace(/\/$/, '')}/ack?type=${type}&id=${encodeURIComponent(id)}&hours=${hours}`;
 }
 
-async function sendSlackAlert(failedConnectors, totalConnectors, unhealthyGroups) {
+async function sendSlackAlert(brokerDown, failedConnectors, totalConnectors, unhealthyGroups) {
   if (!SLACK_WEBHOOK) return;
   const now = new Date().toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
   const lines = [];
+
+  if (brokerDown) {
+    lines.push(`🔴 *Kafka Cluster Unreachable* — Could not reach brokers on \`${CLUSTER_NAME}\``);
+    lines.push(`_Checked at ${now}_`);
+    lines.push(`_Error: ${state.brokerError || 'Unknown'}_`);
+    lines.push(`🔗 <${KAFKA_UI_URL}/ui/clusters/${CLUSTER_NAME}|View in Kafka UI>`);
+    lines.push('');
+  }
 
   if (failedConnectors.length > 0) {
     lines.push(`🚨 *Kafka Connector Alert* — ${failedConnectors.length} of ${totalConnectors} failing on \`${CLUSTER_NAME}\``);
@@ -377,12 +393,34 @@ async function sendSlackAlert(failedConnectors, totalConnectors, unhealthyGroups
 async function runCheck() {
   console.log(`[${new Date().toISOString()}] Running health check...`);
   state.checkCount++;
+  state.brokerStatus = 'pending';
+  state.brokerError = null;
+  state.brokers = null;
 
   try {
-    const [connectors, consumerGroups] = await Promise.all([
+    const [brokersResult, connectorsResult, consumerGroupsResult] = await Promise.allSettled([
+      fetchBrokers(),
       fetchConnectors(),
       fetchAllConsumerGroups()
     ]);
+
+    if (brokersResult.status === 'fulfilled') {
+      state.brokers = brokersResult.value;
+      state.brokerStatus = 'ok';
+    } else {
+      state.brokerStatus = 'unreachable';
+      state.brokerError = brokersResult.reason?.message || 'Could not reach Kafka cluster';
+      console.error(`[BROKER] Unreachable: ${state.brokerError}`);
+    }
+
+    const connectors = connectorsResult.status === 'fulfilled' ? connectorsResult.value : [];
+    const consumerGroups = consumerGroupsResult.status === 'fulfilled' ? consumerGroupsResult.value : [];
+    if (connectorsResult.status === 'rejected') {
+      console.error('[CONNECTOR] Fetch failed:', connectorsResult.reason?.message);
+    }
+    if (consumerGroupsResult.status === 'rejected') {
+      console.error('[CONSUMER] Fetch failed:', consumerGroupsResult.reason?.message);
+    }
 
     const failedConnectors = connectors.filter(
       c => c.status?.state !== 'RUNNING' || c.failed_tasks_count > 0
@@ -418,27 +456,30 @@ async function runCheck() {
     state.lastChecked   = new Date().toISOString();
     state.connectors    = connectors;
     state.consumerGroups = consumerGroups;
-    state.status        = (failedConnectors.length > 0 || unhealthyGroups.length > 0) ? 'alert' : 'ok';
+    const brokerDown = state.brokerStatus === 'unreachable';
+    state.status        = (brokerDown || failedConnectors.length > 0 || unhealthyGroups.length > 0) ? 'alert' : 'ok';
 
     const toAlertConns = failedConnectors.filter(c => !isAcknowledged('connector', c.name));
     const toAlertCons  = unhealthyGroups.filter(g => !isAcknowledged('consumer', g.groupId));
 
-    if (toAlertConns.length > 0 || toAlertCons.length > 0) {
-      await sendSlackAlert(toAlertConns, connectors.length, toAlertCons);
+    if (brokerDown || toAlertConns.length > 0 || toAlertCons.length > 0) {
+      await sendSlackAlert(brokerDown, toAlertConns, connectors.length, toAlertCons);
       const event = {
         time: state.lastChecked,
+        brokerDown: brokerDown ? 1 : 0,
         connectorCount: failedConnectors.length,
         consumerCount: unhealthyGroups.length,
         names: [
+          ...(brokerDown ? ['broker:cluster-unreachable'] : []),
           ...failedConnectors.map(c => `connector:${c.name}`),
           ...unhealthyGroups.map(g => `consumer:${g.groupId}`)
         ]
       };
       state.alerts.unshift(event);
       if (state.alerts.length > 20) state.alerts.pop();
-      console.log(`[ALERT] Connectors: ${failedConnectors.length} failed | Consumers: ${unhealthyGroups.length} unhealthy`);
+      console.log(`[ALERT] ${brokerDown ? 'Broker unreachable | ' : ''}Connectors: ${failedConnectors.length} failed | Consumers: ${unhealthyGroups.length} unhealthy`);
     } else {
-      console.log(`[OK] ${connectors.length} connectors, ${consumerGroups.length} consumer groups — all healthy.`);
+      console.log(`[OK] Brokers: ${state.brokers?.length ?? 0} | ${connectors.length} connectors | ${consumerGroups.length} consumer groups — all healthy.`);
     }
   } catch (err) {
     state.status = 'error';
@@ -520,6 +561,9 @@ app.get('/api/status', (req, res) => {
     kafkaUiUrl:     KAFKA_UI_URL,
     lagThreshold:   LAG_THRESHOLD,
     acks,
+    brokers:        state.brokers,
+    brokerStatus:   state.brokerStatus,
+    brokerError:    state.brokerError,
     connectors: state.connectors.map(c => ({
       name:        c.name,
       connect:     c.connect,

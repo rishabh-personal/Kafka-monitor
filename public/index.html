@@ -174,6 +174,13 @@
     .stat-card .value.ok    { color: var(--success); }
     .stat-card .value.alert { color: var(--danger); }
     .stat-card .value.error { color: var(--warning); }
+    .stat-card.failed { border-color: var(--danger); background: var(--danger-bg); }
+
+    .broker-table-wrap { overflow-x: auto; margin-top: 10px; }
+    .broker-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; font-family: 'JetBrains Mono', monospace; }
+    .broker-table th, .broker-table td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+    .broker-table th { color: var(--text-muted); font-weight: 600; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    .reasons-text { color: var(--danger); font-weight: 500; }
 
     .section-title {
       font-size: 0.8rem;
@@ -420,6 +427,10 @@
 
 <!-- Stats row -->
 <div class="stats">
+  <div class="stat-card" id="stat-brokers-wrap">
+    <div class="label">Brokers</div>
+    <div class="value" id="stat-brokers">—</div>
+  </div>
   <div class="stat-card">
     <div class="label">Total Connectors</div>
     <div class="value" id="stat-conn-total">—</div>
@@ -444,6 +455,12 @@
     <div class="label">Checks Run</div>
     <div class="value" id="stat-checks">—</div>
   </div>
+</div>
+
+<!-- Broker Status -->
+<div class="section-title">Broker Status</div>
+<div id="broker-status-card" class="card">
+  <div class="empty">Loading…</div>
 </div>
 
 <!-- Connectors -->
@@ -753,6 +770,54 @@
     document.getElementById('status-dot').className = `dot ${data.status || 'pending'}`;
     document.getElementById('cluster-label').textContent = `cluster: ${data.cluster}`;
     document.getElementById('last-checked').textContent  = `Last checked: ${timeAgo(data.lastChecked)}`;
+
+    // Broker stats
+    const brokerWrap = document.getElementById('stat-brokers-wrap');
+    const brokerStat = document.getElementById('stat-brokers');
+    if (data.brokerStatus === 'unreachable') {
+      brokerStat.textContent = 'Down';
+      brokerStat.className = 'value alert';
+      if (brokerWrap) brokerWrap.classList.add('failed');
+    } else {
+      brokerStat.textContent = data.brokers?.length ?? '—';
+      brokerStat.className = 'value';
+      if (brokerWrap) brokerWrap.classList.remove('failed');
+    }
+
+    // Broker status card
+    const brokerCard = document.getElementById('broker-status-card');
+    if (data.brokerStatus === 'unreachable') {
+      brokerCard.className = 'card failed';
+      brokerCard.innerHTML = `
+        <div class="name">⚠ Cluster Unreachable</div>
+        <div class="row"><span>Status</span><span class="reasons-text">Brokers not reachable</span></div>
+        <div class="row"><span>Error</span><span>${attrEsc(data.brokerError || 'Unknown error')}</span></div>
+      `;
+    } else if (data.brokers && data.brokers.length > 0) {
+      brokerCard.className = 'card';
+      const rows = data.brokers.map(b => `
+        <tr>
+          <td>${b.id}</td>
+          <td>${attrEsc(b.host || '—')}</td>
+          <td>${b.port ?? '—'}</td>
+          <td>${b.partitions ?? '—'}</td>
+          <td>${b.partitionsLeader ?? '—'}</td>
+          <td>${b.inSyncPartitions ?? '—'}</td>
+        </tr>
+      `).join('');
+      brokerCard.innerHTML = `
+        <div class="name">${data.brokers.length} broker(s) online</div>
+        <div class="broker-table-wrap">
+          <table class="broker-table">
+            <thead><tr><th>ID</th><th>Host</th><th>Port</th><th>Partitions</th><th>Leaders</th><th>In-sync</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      `;
+    } else {
+      brokerCard.className = 'card';
+      brokerCard.innerHTML = '<div class="empty">No broker data</div>';
+    }
 
     // Connector stats
     const connTotal   = data.connectors.length;
