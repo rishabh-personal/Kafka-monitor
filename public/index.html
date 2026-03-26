@@ -401,6 +401,64 @@
     .filter-btn.active { border-color: var(--accent); color: var(--accent); background: rgba(107, 159, 255, 0.08); }
 
     .header-actions { display: flex; align-items: center; gap: 10px; }
+
+    .dz-summary-btn {
+      margin-top: 12px; padding: 10px 12px; width: 100%; text-align: left;
+      background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-sm);
+      cursor: pointer; transition: border-color var(--transition), background var(--transition);
+      font-family: inherit; color: var(--text);
+    }
+    .dz-summary-btn:hover { border-color: var(--accent); background: var(--bg-card); }
+    .dz-summary-btn .dz-label {
+      font-size: 0.65rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 4px;
+    }
+    .dz-summary-btn .dz-main { font-size: 0.84rem; font-weight: 600; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .dz-summary-btn .dz-main span:first-child { flex: 1; min-width: 0; }
+    .dz-summary-btn .dz-chevron { color: var(--text-dim); font-size: 0.75rem; flex-shrink: 0; }
+    .dz-summary-btn .dz-sub { font-size: 0.72rem; color: var(--text-muted); margin-top: 4px; font-weight: 400; }
+    .dz-summary-btn.dz-st-ok .dz-main { color: var(--success); }
+    .dz-summary-btn.dz-st-warn .dz-main { color: var(--warning); }
+    .dz-summary-btn.dz-st-bad .dz-main { color: var(--danger); }
+    .dz-summary-btn.dz-st-muted .dz-main { color: var(--text-muted); }
+
+    .side-overlay {
+      position: fixed; inset: 0; background: rgba(0, 0, 0, 0.48); z-index: 1000;
+      opacity: 0; visibility: hidden; transition: opacity 0.2s ease, visibility 0.2s;
+    }
+    .side-overlay.open { opacity: 1; visibility: visible; }
+    .side-panel {
+      position: fixed; top: 0; right: 0; bottom: 0; width: min(460px, 100vw); max-width: 100%;
+      background: var(--bg-card); border-left: 1px solid var(--border);
+      box-shadow: -8px 0 32px rgba(0, 0, 0, 0.35); z-index: 1001;
+      transform: translateX(100%); transition: transform 0.28s ease;
+      display: flex; flex-direction: column;
+    }
+    [data-theme="light"] .side-panel { box-shadow: -4px 0 24px rgba(0, 0, 0, 0.08); }
+    .side-panel.open { transform: translateX(0); }
+    .side-panel-header {
+      padding: 18px 20px; border-bottom: 1px solid var(--border);
+      display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-shrink: 0;
+    }
+    .side-panel-header h2 { font-size: 1rem; font-weight: 600; color: var(--text); line-height: 1.35; word-break: break-word; }
+    .side-close {
+      flex-shrink: 0; width: 36px; height: 36px; border: none; border-radius: var(--radius-sm);
+      background: var(--bg-elevated); color: var(--text-muted); font-size: 1.35rem; line-height: 1; cursor: pointer;
+      transition: background var(--transition), color var(--transition);
+    }
+    .side-close:hover { background: var(--border); color: var(--text); }
+    .side-panel-body { flex: 1; overflow-y: auto; padding: 16px 20px 40px; font-size: 0.8rem; }
+    .side-panel-body .dz-meta { color: var(--text-muted); margin-bottom: 16px; line-height: 1.5; }
+    .side-panel-body .dz-section-title {
+      font-size: 0.68rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em;
+      margin: 18px 0 8px;
+    }
+    .side-panel-body .dz-section-title:first-of-type { margin-top: 0; }
+    .dz-topic-table { width: 100%; border-collapse: collapse; font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; }
+    .dz-topic-table th, .dz-topic-table td { padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--border); word-break: break-all; }
+    .dz-topic-table th { color: var(--text-muted); font-weight: 600; font-size: 0.65rem; text-transform: uppercase; }
+    .dz-topic-table tr.missing td { color: var(--danger); }
+    .dz-topic-table tr.ok td { color: var(--text); }
+    .dz-panel-notes { font-size: 0.76rem; color: var(--text-dim); font-style: italic; margin-top: 14px; line-height: 1.45; }
   </style>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -469,6 +527,15 @@
 <div class="cards-grid" id="connectors-grid">
   <div class="empty">Loading…</div>
 </div>
+
+<div id="debezium-overlay" class="side-overlay" onclick="closeDebeziumPanel()" aria-hidden="true"></div>
+<aside id="debezium-side" class="side-panel" aria-hidden="true" onclick="event.stopPropagation()">
+  <div class="side-panel-header">
+    <h2 id="debezium-panel-title">Debezium topics</h2>
+    <button type="button" class="side-close" onclick="closeDebeziumPanel()" aria-label="Close">×</button>
+  </div>
+  <div id="debezium-panel-body" class="side-panel-body"></div>
+</aside>
 
 <!-- Consumer Groups -->
 <div class="section-title">Consumer Groups</div>
@@ -625,15 +692,110 @@
     return String(s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
+  function isDebeziumConnector(c) {
+    return (c.connectorClass || '').toLowerCase().includes('debezium');
+  }
+
+  function debeziumSummaryParts(d) {
+    if (!d) return { main: '—', sub: '', state: 'muted' };
+    if (d.skipped) return { main: 'Topics check skipped', sub: d.reason || '', state: 'warn' };
+    if (d.error) return { main: 'Topics check failed', sub: d.error, state: 'bad' };
+    const exp = (d.expected || []).length;
+    const miss = (d.missing || []).length;
+    if (d.ok && exp === 0) {
+      return {
+        main: d.indeterminate ? 'No list derived' : 'Nothing to verify',
+        sub: d.indeterminate ? 'Add table.include.list or Connect topics' : '',
+        state: 'muted'
+      };
+    }
+    if (d.ok) return { main: `All available (${exp} topic${exp === 1 ? '' : 's'})`, sub: '', state: 'ok' };
+    return { main: `${miss} missing of ${exp}`, sub: '', state: 'bad' };
+  }
+
+  function debeziumSummaryRow(c) {
+    if (!isDebeziumConnector(c)) return '';
+    const parts = debeziumSummaryParts(c.debeziumTopics);
+    const stateClass = `dz-st-${parts.state}`;
+    const sub = parts.sub ? `<div class="dz-sub">${attrEsc(parts.sub)}</div>` : '';
+    const enc = encodeURIComponent(String(c.name));
+    return `<button type="button" class="dz-summary-btn ${stateClass}" data-dz-enc="${attrEsc(enc)}">
+    <div class="dz-label">Debezium topics</div>
+    <div class="dz-main"><span>${attrEsc(parts.main)}</span><span class="dz-chevron">›</span></div>
+    ${sub}
+  </button>`;
+  }
+
+  function buildDebeziumPanelBody(c) {
+    const d = c.debeziumTopics;
+    if (!d) return '<p class="dz-meta">No topic verification data for this connector.</p>';
+    if (d.skipped) return `<p class="dz-meta">${attrEsc(d.reason || 'Skipped')}</p>`;
+    if (d.error) return `<p class="dz-meta" style="color:var(--danger)">${attrEsc(d.error)}</p>`;
+    const src = d.source === 'kafka-connect' ? 'Kafka Connect' : 'Derived from connector config';
+    let html = `<div class="dz-meta">Source: <strong>${attrEsc(src)}</strong><br/>Expected topic count: <strong>${(d.expected || []).length}</strong></div>`;
+
+    const missing = d.missing || [];
+    const present = d.present || [];
+
+    if (missing.length) {
+      html += `<div class="dz-section-title">Missing in Kafka (${missing.length})</div>`;
+      html += '<table class="dz-topic-table"><thead><tr><th>Topic</th></tr></thead><tbody>';
+      for (const t of missing) html += `<tr class="missing"><td>${attrEsc(t)}</td></tr>`;
+      html += '</tbody></table>';
+    }
+
+    if (present.length) {
+      html += `<div class="dz-section-title">Present in cluster (${present.length})</div>`;
+      html += '<table class="dz-topic-table"><thead><tr><th>Topic</th></tr></thead><tbody>';
+      for (const t of present) html += `<tr class="ok"><td>${attrEsc(t)}</td></tr>`;
+      html += '</tbody></table>';
+    }
+
+    const notes = [];
+    if (d.notes && d.notes.length) notes.push(...d.notes);
+    if (d.indeterminate) notes.push('Some topics may not be derived from config (regex includes, empty table list, or custom naming).');
+    if (notes.length) html += `<div class="dz-panel-notes">${notes.map(attrEsc).join(' ')}</div>`;
+
+    return html;
+  }
+
+  function openDebeziumPanel(name) {
+    const c = _data && _data.connectors && _data.connectors.find(x => x.name === name);
+    if (!c) return;
+    document.getElementById('debezium-panel-title').textContent = name;
+    document.getElementById('debezium-panel-body').innerHTML = buildDebeziumPanelBody(c);
+    document.getElementById('debezium-overlay').classList.add('open');
+    document.getElementById('debezium-side').classList.add('open');
+    document.getElementById('debezium-overlay').setAttribute('aria-hidden', 'false');
+    document.getElementById('debezium-side').setAttribute('aria-hidden', 'false');
+    document.body.style.overflow = 'hidden';
+  }
+
+  function closeDebeziumPanel() {
+    document.getElementById('debezium-overlay').classList.remove('open');
+    document.getElementById('debezium-side').classList.remove('open');
+    document.getElementById('debezium-overlay').setAttribute('aria-hidden', 'true');
+    document.getElementById('debezium-side').setAttribute('aria-hidden', 'true');
+    document.body.style.overflow = '';
+  }
+
   // ── render connectors ──────────────────────────────────────────────────────
   function renderConnectors() {
     if (!_data) return;
     const q = document.getElementById('conn-search').value.toLowerCase();
     const grid = document.getElementById('connectors-grid');
 
-    let list = _data.connectors;
-    if (q) list = list.filter(c => c.name.toLowerCase().includes(q));
-    if (!list.length) { grid.innerHTML = '<div class="empty">No connectors match.</div>'; return; }
+    const allConnectors = _data.connectors || [];
+    let list = allConnectors;
+    if (q) list = list.filter(c => (c.name || '').toLowerCase().includes(q));
+    if (!list.length) {
+      grid.innerHTML = `<div class="empty">${
+        !allConnectors.length
+          ? 'No connectors in this cluster.'
+          : 'No connectors match your search.'
+      }</div>`;
+      return;
+    }
 
     const sorted = [...list].sort((a, b) => {
       const af = a.state !== 'RUNNING' || a.failedTasks > 0;
@@ -643,6 +805,8 @@
 
     grid.innerHTML = sorted.map(c => {
       const isFailed = c.state !== 'RUNNING' || c.failedTasks > 0;
+      const dzBad = c.debeziumTopics && c.debeziumTopics.ok === false;
+      const cardClass = ['card', isFailed ? 'failed' : '', dzBad && !isFailed ? 'warning' : ''].filter(Boolean).join(' ');
       const until = ackUntil('connector', c.name);
       const ackBlock = isFailed ? `
           <div class="ack-row">
@@ -654,7 +818,7 @@
             <button class="ack-btn" data-ack-type="connector" data-ack-id="${attrEsc(c.name)}" onclick="ack(this.dataset.ackType,this.dataset.ackId,12)">12h</button>`}
           </div>` : '';
       return `
-        <div class="card ${isFailed ? 'failed' : ''}">
+        <div class="${cardClass}">
           <div class="name">${c.name}</div>
           <div class="row">
             <span>Status</span>
@@ -663,6 +827,7 @@
           <div class="row"><span>Type</span><span>${c.type || '—'}</span></div>
           <div class="row"><span>Connect</span><span>${c.connect || '—'}</span></div>
           <div class="row"><span>Tasks</span><span>${c.tasksCount ?? '—'} total / ${c.failedTasks ?? 0} failed</span></div>
+          ${debeziumSummaryRow(c)}
           ${ackBlock}
         </div>`;
     }).join('');
@@ -683,12 +848,20 @@
     const threshold = _data.lagThreshold || 10000;
     const grid      = document.getElementById('cg-grid');
 
-    let list = _data.consumerGroups || [];
-    if (q) list = list.filter(g => g.groupId.toLowerCase().includes(q));
+    const allGroups = _data.consumerGroups || [];
+    let list = allGroups;
+    if (q) list = list.filter(g => (g.groupId || '').toLowerCase().includes(q));
     if (_cgFilter === 'unhealthy') list = list.filter(g => isGroupUnhealthy(g, threshold));
     if (_cgFilter === 'stable')    list = list.filter(g => g.state === 'STABLE');
 
-    if (!list.length) { grid.innerHTML = '<div class="empty">No groups match.</div>'; return; }
+    if (!list.length) {
+      grid.innerHTML = `<div class="empty">${
+        !allGroups.length
+          ? 'No consumer groups in this cluster.'
+          : 'No groups match your search or filter.'
+      }</div>`;
+      return;
+    }
 
     // Sort: unhealthy first, then by lag desc
     const sorted = [...list].sort((a, b) => {
@@ -883,6 +1056,18 @@
       btn.textContent = '▶ Check now';
     }
   }
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') closeDebeziumPanel();
+  });
+
+  document.getElementById('connectors-grid').addEventListener('click', e => {
+    const btn = e.target.closest('.dz-summary-btn');
+    if (!btn || !btn.dataset.dzEnc) return;
+    e.preventDefault();
+    const name = decodeURIComponent(btn.dataset.dzEnc);
+    openDebeziumPanel(name);
+  });
 
   initTheme();
   load();

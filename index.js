@@ -21,6 +21,7 @@ const KAFKA_UI_USER   = process.env.KAFKA_UI_USER   || 'admin';
 const KAFKA_UI_PASS   = process.env.KAFKA_UI_PASS   || 'prodkafka@admin@123';
 const LAG_THRESHOLD   = parseInt(process.env.LAG_THRESHOLD || '10000', 10); // alert if lag > this
 const CHECK_BALANCE   = process.env.CHECK_PARTITION_BALANCE !== 'false'; // verify partition distribution across members
+const CHECK_DEBEZIUM_TOPICS = process.env.CHECK_DEBEZIUM_TOPICS !== 'false'; // verify Debezium expected topics exist in Kafka
 const APP_URL         = process.env.APP_URL || ''; // public URL for ack links in Slack (e.g. https://your-app.ondigitalocean.app)
 
 // ── Acknowledgement store (pause alerts for 1, 2, 4 or 12 hours) ─────────────
@@ -241,6 +242,212 @@ async function fetchConnectors() {
   return apiFetch(`${KAFKA_UI_URL}/api/clusters/${CLUSTER_NAME}/connectors`);
 }
 
+// ── Debezium: cluster topics + connector config (expected capture topics) ─
+async function fetchAllTopicNames() {
+  const perPage = 100;
+  const base = `${KAFKA_UI_URL}/api/clusters/${CLUSTER_NAME}/topics`;
+  const first = await apiFetch(`${base}?page=0&perPage=${perPage}&showInternal=true`);
+  const names = (first.topics || []).map(t => t.name);
+  const totalPages = first.pageCount || 1;
+  for (let page = 1; page < totalPages; page++) {
+    const data = await apiFetch(`${base}?page=${page}&perPage=${perPage}&showInternal=true`);
+    names.push(...(data.topics || []).map(t => t.name));
+  }
+  return names;
+}
+
+async function fetchConnectorConfig(connectName, connectorName) {
+  const cn = encodeURIComponent(connectName);
+  const n = encodeURIComponent(connectorName);
+  return apiFetch(`${KAFKA_UI_URL}/api/clusters/${CLUSTER_NAME}/connects/${cn}/connectors/${n}/config`);
+}
+
+function normalizeConnectorConfig(raw) {
+  if (!raw || typeof raw !== 'object') return {};
+  const out = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (v != null && typeof v === 'object' && !Array.isArray(v)) {
+      if ('value' in v) out[k] = String(v.value);
+      else if ('defaultValue' in v) out[k] = String(v.defaultValue);
+      else out[k] = JSON.stringify(v);
+    } else out[k] = String(v);
+  }
+  return out;
+}
+
+function isDebeziumConnector(c) {
+  const cls = (c.connector_class || '').toLowerCase();
+  return cls.includes('debezium');
+}
+
+function parseIncludeList(s) {
+  if (s == null || !String(s).trim()) return [];
+  return String(s)
+    .split(',')
+    .map(x => x.trim())
+    .filter(Boolean);
+}
+
+function looksLikeRegexInclude(entry) {
+  return /[\*\?\[\]\(\)\|\\]/.test(entry);
+}
+
+/** Build expected data + metadata topic names from Debezium connector config (best-effort). */
+function deriveExpectedTopicsFromDebeziumConfig(configMap) {
+  const connectorClass = String(configMap['connector.class'] || '').toLowerCase();
+  const prefix = (configMap['topic.prefix'] || configMap['database.server.name'] || '').trim();
+  const notes = [];
+  const expected = [];
+  let indeterminate = false;
+
+  const hist = configMap['schema.history.internal.kafka.topic'];
+  if (hist) expected.push(hist);
+
+  const tableSpecs = parseIncludeList(configMap['table.include.list']);
+  const collSpecs = parseIncludeList(configMap['collection.include.list']);
+  const dataSpecs = tableSpecs.length ? tableSpecs : collSpecs;
+
+  const hi = parseInt(configMap['heartbeat.interval.ms'] || '0', 10);
+  if (prefix && hi > 0) expected.push(`${prefix}.heartbeat`);
+
+  if (prefix && String(configMap['provide.transaction.metadata'] || '').toLowerCase() === 'true') {
+    expected.push(`${prefix}.transaction`);
+  }
+
+  const signalTopic = configMap['signal.kafka.topic'] || configMap['topic.signal'];
+  if (signalTopic) expected.push(signalTopic);
+
+  if (!dataSpecs.length) {
+    if (!prefix && (hist || expected.length)) {
+      notes.push('No table.include.list / collection.include.list — data topics not derived (connector may capture all tables).');
+      indeterminate = true;
+    } else if (prefix) {
+      notes.push('No table.include.list / collection.include.list — data topics not listed (snapshot/all tables may still apply).');
+      indeterminate = true;
+    }
+    return { expected: [...new Set(expected)], indeterminate, notes, missingPrefix: false };
+  }
+
+  if (!prefix) {
+    notes.push('Missing topic.prefix — cannot derive names from table/collection list.');
+    return { expected: [...new Set(expected)], indeterminate: true, notes, missingPrefix: true };
+  }
+
+  for (const spec of dataSpecs) {
+    if (looksLikeRegexInclude(spec)) {
+      indeterminate = true;
+      notes.push(`Skipped regex-like include: ${spec.slice(0, 80)}${spec.length > 80 ? '…' : ''}`);
+      continue;
+    }
+    const parts = spec.split('.').filter(Boolean);
+    let topicName = null;
+    if (connectorClass.includes('mysql') || connectorClass.includes('mariadb')) {
+      if (parts.length >= 2) topicName = `${prefix}.${parts[0]}.${parts[1]}`;
+    } else if (connectorClass.includes('postgresql') || connectorClass.includes('sqlserver') || connectorClass.includes('db2')) {
+      if (parts.length >= 2) topicName = `${prefix}.${parts[0]}.${parts[1]}`;
+    } else if (connectorClass.includes('oracle')) {
+      if (parts.length === 2) topicName = `${prefix}.${parts[0]}.${parts[1]}`;
+      else if (parts.length === 3) topicName = `${prefix}.${parts[1]}.${parts[2]}`;
+    } else if (connectorClass.includes('mongodb')) {
+      if (parts.length >= 2) topicName = `${prefix}.${parts[0]}.${parts.slice(1).join('.')}`;
+    } else {
+      if (parts.length >= 2) {
+        topicName = `${prefix}.${parts[parts.length - 2]}.${parts[parts.length - 1]}`;
+      } else indeterminate = true;
+    }
+    if (topicName) expected.push(topicName);
+  }
+
+  return { expected: [...new Set(expected)], indeterminate, notes, missingPrefix: false };
+}
+
+/**
+ * Compare Debezium-expected topics to cluster. Prefers Kafka Connect–declared `topics` on the
+ * connector when Kafka UI provides them; otherwise derives from config.
+ */
+function verifyDebeziumTopicsAgainstCluster(connector, topicSet, configMap) {
+  const fromConnect = Array.isArray(connector.topics) ? connector.topics.filter(Boolean) : [];
+  const derived = deriveExpectedTopicsFromDebeziumConfig(configMap);
+
+  let expected = [];
+  let source = 'derived-config';
+  let indeterminate = derived.indeterminate;
+  let notes = [...derived.notes];
+
+  if (fromConnect.length > 0) {
+    expected = [...fromConnect];
+    source = 'kafka-connect';
+    indeterminate = false;
+  } else {
+    expected = [...derived.expected];
+  }
+
+  const hist = configMap['schema.history.internal.kafka.topic'];
+  if (hist && !expected.includes(hist)) expected.push(hist);
+
+  expected = [...new Set(expected)];
+
+  if (derived.missingPrefix && fromConnect.length === 0 && parseIncludeList(configMap['table.include.list']).length > 0) {
+    return {
+      ok: false,
+      source,
+      expected,
+      missing: [],
+      present: [],
+      indeterminate: true,
+      notes: [...notes, 'Need topic.prefix or database.server.name to map table.include.list to topic names.'],
+      error: 'Missing topic.prefix for derived table topics'
+    };
+  }
+
+  const missing = expected.filter(t => !topicSet.has(t));
+  const present = expected.filter(t => topicSet.has(t));
+  return {
+    ok: missing.length === 0,
+    source,
+    expected,
+    missing,
+    present,
+    indeterminate,
+    notes
+  };
+}
+
+async function enrichDebeziumTopicState(connectors, brokerOk) {
+  if (!CHECK_DEBEZIUM_TOPICS) return;
+  if (!brokerOk) {
+    for (const c of connectors.filter(isDebeziumConnector)) {
+      c.debeziumTopicVerification = { ok: null, skipped: true, reason: 'Broker/cluster unreachable' };
+    }
+    return;
+  }
+
+  let topicSet = null;
+  try {
+    const names = await fetchAllTopicNames();
+    topicSet = new Set(names);
+  } catch (err) {
+    console.warn(`[DEBEZIUM] Could not load topics: ${err.message}`);
+  }
+
+  const targets = connectors.filter(isDebeziumConnector);
+  await Promise.all(
+    targets.map(async c => {
+      try {
+        if (!topicSet) {
+          c.debeziumTopicVerification = { ok: null, error: 'Cluster topics unavailable', expected: [], missing: [], present: [] };
+          return;
+        }
+        const rawCfg = await fetchConnectorConfig(c.connect, c.name);
+        const configMap = normalizeConnectorConfig(rawCfg);
+        c.debeziumTopicVerification = verifyDebeziumTopicsAgainstCluster(c, topicSet, configMap);
+      } catch (err) {
+        c.debeziumTopicVerification = { ok: null, error: err.message, expected: [], missing: [], present: [] };
+      }
+    })
+  );
+}
+
 // ── Core: fetch all consumer groups (all pages) ────────────────────────────
 async function fetchAllConsumerGroups() {
   const perPage = 100;
@@ -422,6 +629,8 @@ async function runCheck() {
       console.error('[CONSUMER] Fetch failed:', consumerGroupsResult.reason?.message);
     }
 
+    await enrichDebeziumTopicState(connectors, state.brokerStatus === 'ok');
+
     const failedConnectors = connectors.filter(
       c => c.status?.state !== 'RUNNING' || c.failed_tasks_count > 0
     );
@@ -568,11 +777,13 @@ app.get('/api/status', (req, res) => {
       name:        c.name,
       connect:     c.connect,
       type:        c.type,
+      connectorClass: c.connector_class,
       state:       c.status?.state,
       tasksCount:  c.tasks_count,
       failedTasks: c.failed_tasks_count,
       workerId:    c.status?.worker_id,
-      acknowledged: isAcknowledged('connector', c.name)
+      acknowledged: isAcknowledged('connector', c.name),
+      debeziumTopics: c.debeziumTopicVerification || null
     })),
     consumerGroups: state.consumerGroups.map(g => ({
       groupId:         g.groupId,
