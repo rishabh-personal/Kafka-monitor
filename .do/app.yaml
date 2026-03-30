@@ -25,3 +25,6 @@ services:
         value: "https://your-app.ondigitalocean.app"
       - key: CHECK_INTERVAL
         value: "*/15 * * * *"
+      # Debezium topic verification (omit or "true" = enabled; "false" = disabled)
+      - key: CHECK_DEBEZIUM_TOPICS
+        value: "true"

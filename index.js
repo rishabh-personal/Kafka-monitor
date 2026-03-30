@@ -769,6 +769,8 @@ app.get('/api/status', (req, res) => {
     cluster:        CLUSTER_NAME,
     kafkaUiUrl:     KAFKA_UI_URL,
     lagThreshold:   LAG_THRESHOLD,
+    checkDebeziumTopics: CHECK_DEBEZIUM_TOPICS,
+    checkPartitionBalance: CHECK_BALANCE,
     acks,
     brokers:        state.brokers,
     brokerStatus:   state.brokerStatus,

@@ -474,6 +474,7 @@
   <div class="meta">
     <span id="cluster-label">—</span>
     <span id="last-checked">Last checked: —</span>
+    <span id="check-flags" style="font-size:0.78rem;color:var(--text-dim)"></span>
     <span id="refresh-indicator"></span>
     <div class="header-actions">
       <button class="theme-btn" id="theme-btn" onclick="toggleTheme()" title="Toggle dark/light mode" aria-label="Toggle theme">🌙</button>
@@ -884,7 +885,12 @@
 
       const members = g.memberAssignments || _memberDetailsCache[g.groupId];
       const membersHtml = members && members.length ? members.map(m => {
-        const topicsRows = (m.topics || []).map(t => {
+        const topicList = [...(m.topics || [])].sort((a, b) => {
+          const la = a.lag != null ? Number(a.lag) : -1;
+          const lb = b.lag != null ? Number(b.lag) : -1;
+          return lb - la;
+        });
+        const topicsRows = topicList.map(t => {
           const lagCell = t.lag != null ? fmtNum(t.lag) : '—';
           const lagClass = t.lag > threshold ? ' lag-high' : '';
           return `<tr><td>${attrEsc(t.topic)}</td><td>${t.partition}</td><td class="lag-cell ${lagClass}">${lagCell}</td></tr>`;
@@ -943,6 +949,12 @@
     document.getElementById('status-dot').className = `dot ${data.status || 'pending'}`;
     document.getElementById('cluster-label').textContent = `cluster: ${data.cluster}`;
     document.getElementById('last-checked').textContent  = `Last checked: ${timeAgo(data.lastChecked)}`;
+    const flagsEl = document.getElementById('check-flags');
+    if (flagsEl) {
+      const dz = data.checkDebeziumTopics !== false ? 'Debezium topics: on' : 'Debezium topics: off';
+      const bal = data.checkPartitionBalance !== false ? 'partition balance: on' : 'partition balance: off';
+      flagsEl.textContent = `${dz} · ${bal}`;
+    }
 
     // Broker stats
     const brokerWrap = document.getElementById('stat-brokers-wrap');
