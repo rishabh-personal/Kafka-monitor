@@ -284,7 +284,15 @@
     .member-row:hover { background: var(--bg-elevated); border-color: var(--border); }
     .member-row.expanded { border-color: var(--border); background: var(--bg-elevated); }
     .member-row .cid { font-family: 'JetBrains Mono', 'SF Mono', monospace; font-size: 0.72rem; color: var(--text); max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
-    .member-row .partitions { color: var(--text-muted); font-size: 0.7rem; }
+    .member-row .partitions { color: var(--text-muted); font-size: 0.7rem; flex: 1; min-width: 0; text-align: right; margin-right: 8px; }
+    .member-row .member-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+    .member-refresh-btn {
+      border: none; background: transparent; color: var(--text-muted); cursor: pointer;
+      padding: 4px 6px; border-radius: 4px; font-size: 0.9rem; line-height: 1;
+      transition: color var(--transition), background var(--transition);
+    }
+    .member-refresh-btn:hover { color: var(--accent); background: var(--bg-elevated); }
+    .member-refresh-btn:disabled { opacity: 0.45; cursor: wait; }
     .member-row .chevron { color: var(--text-muted); font-size: 0.65rem; transition: transform var(--transition); }
     .member-row.expanded .chevron { transform: rotate(90deg); }
     .member-topics {
@@ -597,6 +605,24 @@
     if (btn) { btn.disabled = false; btn.textContent = 'Load members'; }
   }
 
+  /** Re-fetch consumer group details from Kafka UI (full group); updates partition lags for all members in the group. */
+  async function refreshMemberLags(groupId, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = '…'; }
+    try {
+      const res = await fetch(`/api/consumer-groups/${encodeURIComponent(groupId)}/details`);
+      if (!res.ok) throw new Error('Request failed');
+      const json = await res.json();
+      if (json.memberAssignments) {
+        _memberDetailsCache[groupId] = json.memberAssignments;
+        renderConsumerGroups();
+      }
+    } catch (e) {
+      console.error('Refresh lags failed:', e);
+      if (btn) btn.textContent = '↻';
+    }
+    if (btn) { btn.disabled = false; btn.textContent = '↻'; }
+  }
+
   function toggleMemberTopics(el) {
     el.classList.toggle('expanded');
   }
@@ -883,7 +909,7 @@
       if (g.consumerLag > threshold) reasons.push(`lag: ${fmtNum(g.consumerLag)}`);
       if (g.partitionUnbalanced) reasons.push(`unbalanced partitions (${g.partitionBalance?.min ?? '?'}-${g.partitionBalance?.max ?? '?'} per member)`);
 
-      const members = g.memberAssignments || _memberDetailsCache[g.groupId];
+      const members = _memberDetailsCache[g.groupId] || g.memberAssignments;
       const membersHtml = members && members.length ? members.map(m => {
         const topicList = [...(m.topics || [])].sort((a, b) => {
           const la = a.lag != null ? Number(a.lag) : -1;
@@ -899,17 +925,22 @@
           ? `<table><thead><tr><th>Topic</th><th>Partition</th><th>Lag</th></tr></thead><tbody>${topicsRows}</tbody></table>`
           : '<span class="topic-item">—</span>';
         const memberLagStr = m.memberLag != null && m.memberLag > 0 ? ` • ${fmtNum(m.memberLag)} lag` : '';
+        const gid = JSON.stringify(g.groupId);
         return `
           <div class="member-row" onclick="toggleMemberTopics(this)">
-            <span class="cid" title="${m.consumerId}">${m.consumerId}</span>
+            <span class="cid" title="${attrEsc(m.consumerId)}">${attrEsc(m.consumerId)}</span>
             <span class="partitions">${m.topics?.length || 0} partitions${memberLagStr}</span>
-            <span class="chevron">▶</span>
+            <div class="member-actions">
+              <button type="button" class="member-refresh-btn" title="Refresh partition lags (re-fetches this consumer group from Kafka; updates all members)"
+                onclick='event.stopPropagation(); refreshMemberLags(${gid}, this)'>↻</button>
+              <span class="chevron">▶</span>
+            </div>
           </div>
           <div class="member-topics">${topicsTable}</div>`;
       }).join('') : '';
 
       const membersBlock = members && members.length
-        ? `<div class="members-block"><div class="label">Members (click to see topics)</div>${membersHtml}</div>`
+        ? `<div class="members-block"><div class="label">Members — click row for topics · ↻ refresh lags</div>${membersHtml}</div>`
         : (g.members > 0
           ? `<button class="load-members-btn" data-load-members="${attrEsc(g.groupId)}" data-group-id="${attrEsc(g.groupId)}" onclick="loadMembers(this.dataset.groupId)">▶ Load member list</button>`
           : '');
