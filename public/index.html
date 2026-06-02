@@ -273,48 +273,17 @@
     .lag-bar.warning { background: var(--warning); }
     .lag-bar.danger  { background: var(--danger); }
 
-    .members-block { margin-top: 12px; }
-    .members-block .label { font-size: 0.7rem; color: var(--text-muted); margin-bottom: 8px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
-    .member-row {
-      display: flex; align-items: center; justify-content: space-between;
-      font-size: 0.78rem; padding: 8px 12px; margin: 4px 0; background: var(--bg);
-      border-radius: var(--radius-sm); cursor: pointer; transition: all var(--transition);
-      border: 1px solid transparent;
+    .card.cg-card { cursor: pointer; }
+    .card.cg-card:hover { border-color: var(--accent); }
+    .card.cg-card .name { padding-right: 20px; position: relative; }
+    .card.cg-card .name::after {
+      content: '›'; position: absolute; right: 0; top: 0; color: var(--text-dim); font-size: 1.1rem;
     }
-    .member-row:hover { background: var(--bg-elevated); border-color: var(--border); }
-    .member-row.expanded { border-color: var(--border); background: var(--bg-elevated); }
-    .member-row .cid { font-family: 'JetBrains Mono', 'SF Mono', monospace; font-size: 0.72rem; color: var(--text); max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
-    .member-row .partitions { color: var(--text-muted); font-size: 0.7rem; flex: 1; min-width: 0; text-align: right; margin-right: 8px; }
-    .member-row .member-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
-    .member-refresh-btn {
-      border: none; background: transparent; color: var(--text-muted); cursor: pointer;
-      padding: 4px 6px; border-radius: 4px; font-size: 0.9rem; line-height: 1;
-      transition: color var(--transition), background var(--transition);
+    .cg-card-hint {
+      margin-top: 10px; padding: 8px 12px; font-size: 0.76rem; color: var(--text-muted);
+      background: var(--bg); border-radius: var(--radius-sm); border: 1px dashed var(--border);
     }
-    .member-refresh-btn:hover { color: var(--accent); background: var(--bg-elevated); }
-    .member-refresh-btn:disabled { opacity: 0.45; cursor: wait; }
-    .member-row .chevron { color: var(--text-muted); font-size: 0.65rem; transition: transform var(--transition); }
-    .member-row.expanded .chevron { transform: rotate(90deg); }
-    .member-topics {
-      font-size: 0.72rem; color: var(--text-muted); padding: 10px 14px 12px 32px;
-      background: var(--bg); border-radius: 0 0 var(--radius-sm) var(--radius-sm); margin: -4px 0 4px 0;
-      display: none; border-left: 3px solid var(--accent); margin-left: 12px;
-    }
-    .member-row.expanded + .member-topics { display: block; }
-    .member-topics table { width: 100%; border-collapse: collapse; font-size: 0.72rem; font-family: 'JetBrains Mono', monospace; }
-    .member-topics th, .member-topics td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border); }
-    .member-topics th { color: var(--text-muted); font-weight: 600; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em; }
-    .member-topics td { color: var(--text); }
-    .member-topics tr:last-child td { border-bottom: none; }
-    .member-topics .lag-cell { text-align: right; font-variant-numeric: tabular-nums; }
-    .member-topics .lag-high { color: var(--danger); font-weight: 500; }
-    .member-topics .topic-item { color: var(--text-muted); font-style: italic; }
-    .load-members-btn {
-      font-size: 0.78rem; color: var(--accent); background: none; border: none; cursor: pointer;
-      padding: 6px 0; margin-top: 6px; font-weight: 500;
-      transition: color var(--transition);
-    }
-    .load-members-btn:hover { color: var(--accent-hover); }
+    .cg-card-hint strong { color: var(--text); font-weight: 600; }
 
     .ack-row {
       display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
@@ -435,7 +404,7 @@
     }
     .side-overlay.open { opacity: 1; visibility: visible; }
     .side-panel {
-      position: fixed; top: 0; right: 0; bottom: 0; width: min(460px, 100vw); max-width: 100%;
+      position: fixed; top: 0; right: 0; bottom: 0; width: min(480px, 100vw); max-width: 100%;
       background: var(--bg-card); border-left: 1px solid var(--border);
       box-shadow: -8px 0 32px rgba(0, 0, 0, 0.35); z-index: 1001;
       transform: translateX(100%); transition: transform 0.28s ease;
@@ -443,10 +412,42 @@
     }
     [data-theme="light"] .side-panel { box-shadow: -4px 0 24px rgba(0, 0, 0, 0.08); }
     .side-panel.open { transform: translateX(0); }
+    .side-panel.cg-panel { width: min(640px, 100vw); }
     .side-panel-header {
       padding: 18px 20px; border-bottom: 1px solid var(--border);
       display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-shrink: 0;
     }
+    .side-header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+    .side-action-btn {
+      padding: 6px 12px; border-radius: var(--radius-sm); font-size: 0.78rem; font-weight: 500;
+      background: var(--bg-elevated); border: 1px solid var(--border); color: var(--accent); cursor: pointer;
+      font-family: inherit; transition: all var(--transition);
+    }
+    .side-action-btn:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .side-action-btn:disabled { opacity: 0.5; cursor: wait; }
+    .cg-panel-sub { font-size: 0.78rem; color: var(--text-muted); margin-top: 6px; line-height: 1.4; }
+    .panel-loading { padding: 24px 0; text-align: center; color: var(--text-muted); }
+    .cg-table-wrap { overflow-x: auto; margin-top: 4px; -webkit-overflow-scrolling: touch; }
+    .cg-partition-table {
+      width: 100%; min-width: 520px; border-collapse: collapse;
+      font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; table-layout: fixed;
+    }
+    .cg-partition-table th, .cg-partition-table td {
+      padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border);
+      vertical-align: top; overflow-wrap: anywhere; word-break: break-word;
+    }
+    .cg-partition-table th {
+      color: var(--text-muted); font-weight: 600; font-size: 0.65rem; text-transform: uppercase;
+      letter-spacing: 0.05em; position: sticky; top: 0; background: var(--bg-card); z-index: 1;
+    }
+    .cg-partition-table tr:last-child td { border-bottom: none; }
+    .cg-partition-table .col-member { width: 18%; }
+    .cg-partition-table .col-topic { width: 52%; }
+    .cg-partition-table .col-part { width: 10%; white-space: nowrap; }
+    .cg-partition-table .col-lag { width: 12%; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .cg-partition-table td.col-lag { text-align: right; }
+    .cg-partition-table .lag-high { color: var(--danger); font-weight: 600; }
+    .cg-partition-table .member-cell { color: var(--text-dim); font-size: 0.68rem; }
     .side-panel-header h2 { font-size: 1rem; font-weight: 600; color: var(--text); line-height: 1.35; word-break: break-word; }
     .side-close {
       flex-shrink: 0; width: 36px; height: 36px; border: none; border-radius: var(--radius-sm);
@@ -537,13 +538,26 @@
   <div class="empty">Loading…</div>
 </div>
 
-<div id="debezium-overlay" class="side-overlay" onclick="closeDebeziumPanel()" aria-hidden="true"></div>
+<div id="side-overlay" class="side-overlay" onclick="closeAllSidePanels()" aria-hidden="true"></div>
 <aside id="debezium-side" class="side-panel" aria-hidden="true" onclick="event.stopPropagation()">
   <div class="side-panel-header">
     <h2 id="debezium-panel-title">Debezium topics</h2>
     <button type="button" class="side-close" onclick="closeDebeziumPanel()" aria-label="Close">×</button>
   </div>
   <div id="debezium-panel-body" class="side-panel-body"></div>
+</aside>
+<aside id="cg-side" class="side-panel cg-panel" aria-hidden="true" onclick="event.stopPropagation()">
+  <div class="side-panel-header">
+    <div>
+      <h2 id="cg-panel-title">Consumer group</h2>
+      <div id="cg-panel-sub" class="cg-panel-sub"></div>
+    </div>
+    <div class="side-header-actions">
+      <button type="button" class="side-action-btn" id="cg-panel-refresh" title="Refresh partition lags from Kafka">↻ Refresh</button>
+      <button type="button" class="side-close" onclick="closeConsumerGroupPanel()" aria-label="Close">×</button>
+    </div>
+  </div>
+  <div id="cg-panel-body" class="side-panel-body"></div>
 </aside>
 
 <!-- Consumer Groups -->
@@ -571,6 +585,7 @@
   let _data = null;
   let _cgFilter = 'all';
   let _memberDetailsCache = {};
+  let _openCgGroupId = null;
 
   function initTheme() {
     const stored = localStorage.getItem('kafka-monitor-theme');
@@ -588,43 +603,154 @@
     localStorage.setItem('kafka-monitor-theme', next);
   }
 
-  async function loadMembers(groupId) {
-    const sel = `button[data-group-id="${String(groupId).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"]`;
-    const btn = document.querySelector(sel);
-    if (btn) { btn.textContent = 'Loading…'; btn.disabled = true; }
-    try {
-      const res = await fetch(`/api/consumer-groups/${encodeURIComponent(groupId)}/details`);
-      const json = await res.json();
-      if (json.memberAssignments) {
-        _memberDetailsCache[groupId] = json.memberAssignments;
-        renderConsumerGroups();
-      }
-    } catch (e) {
-      if (btn) btn.textContent = 'Load failed';
-    }
-    if (btn) { btn.disabled = false; btn.textContent = 'Load members'; }
+  function updateBodyScrollLock() {
+    const anyOpen = document.getElementById('debezium-side').classList.contains('open')
+      || document.getElementById('cg-side').classList.contains('open');
+    document.body.style.overflow = anyOpen ? 'hidden' : '';
   }
 
-  /** Re-fetch consumer group details from Kafka UI (full group); updates partition lags for all members in the group. */
-  async function refreshMemberLags(groupId, btn) {
-    if (btn) { btn.disabled = true; btn.textContent = '…'; }
-    try {
-      const res = await fetch(`/api/consumer-groups/${encodeURIComponent(groupId)}/details`);
-      if (!res.ok) throw new Error('Request failed');
-      const json = await res.json();
-      if (json.memberAssignments) {
-        _memberDetailsCache[groupId] = json.memberAssignments;
-        renderConsumerGroups();
-      }
-    } catch (e) {
-      console.error('Refresh lags failed:', e);
-      if (btn) btn.textContent = '↻';
-    }
-    if (btn) { btn.disabled = false; btn.textContent = '↻'; }
+  function closeAllSidePanels() {
+    closeDebeziumPanel();
+    closeConsumerGroupPanel();
   }
 
-  function toggleMemberTopics(el) {
-    el.classList.toggle('expanded');
+  async function fetchConsumerGroupDetails(groupId) {
+    const res = await fetch(`/api/consumer-groups/${encodeURIComponent(groupId)}/details`);
+    if (!res.ok) throw new Error('Request failed');
+    const json = await res.json();
+    if (json.memberAssignments) {
+      _memberDetailsCache[groupId] = json.memberAssignments;
+      return json.memberAssignments;
+    }
+    return null;
+  }
+
+  function buildConsumerGroupPanelBody(g, threshold) {
+    const members = _memberDetailsCache[g.groupId] || g.memberAssignments;
+    if (!members || !members.length) {
+      if ((g.members || 0) > 0) {
+        return '<p class="dz-meta">No partition details available. Use Refresh or run a health check.</p>';
+      }
+      return '<p class="dz-meta">No active members in this group.</p>';
+    }
+
+    const rows = [];
+    for (const m of members) {
+      const topicList = [...(m.topics || [])].sort((a, b) => {
+        const la = a.lag != null ? Number(a.lag) : -1;
+        const lb = b.lag != null ? Number(b.lag) : -1;
+        return lb - la;
+      });
+      for (const t of topicList) {
+        rows.push({ consumerId: m.consumerId, topic: t.topic, partition: t.partition, lag: t.lag });
+      }
+    }
+    rows.sort((a, b) => {
+      const la = a.lag != null ? Number(a.lag) : -1;
+      const lb = b.lag != null ? Number(b.lag) : -1;
+      return lb - la;
+    });
+
+    const bodyRows = rows.map(r => {
+      const lagCell = r.lag != null ? fmtNum(r.lag) : '—';
+      const lagCls = r.lag > threshold ? ' lag-high' : '';
+      const shortMember = (r.consumerId || '').length > 24
+        ? (r.consumerId || '').slice(-24)
+        : (r.consumerId || '—');
+      return `<tr>
+        <td class="col-member member-cell" title="${attrEsc(r.consumerId)}">${attrEsc(shortMember)}</td>
+        <td class="col-topic">${attrEsc(r.topic)}</td>
+        <td class="col-part">${r.partition ?? '—'}</td>
+        <td class="col-lag${lagCls}">${lagCell}</td>
+      </tr>`;
+    }).join('');
+
+    return `<div class="cg-table-wrap">
+      <table class="cg-partition-table">
+        <thead><tr>
+          <th class="col-member">Member</th>
+          <th class="col-topic">Topic</th>
+          <th class="col-part">Part.</th>
+          <th class="col-lag">Lag</th>
+        </tr></thead>
+        <tbody>${bodyRows}</tbody>
+      </table>
+    </div>
+    <p class="dz-panel-notes">${rows.length} assignment(s) · sorted by lag (highest first)</p>`;
+  }
+
+  function renderConsumerGroupPanelBody(g) {
+    const threshold = _data?.lagThreshold || 10000;
+    const sub = document.getElementById('cg-panel-sub');
+    if (sub) {
+      const members = _memberDetailsCache[g.groupId] || g.memberAssignments;
+      const n = members?.length ?? g.members ?? 0;
+      sub.textContent = `State: ${g.state || '—'} · ${n} member(s) · Total lag: ${fmtNum(g.consumerLag)}`;
+    }
+    document.getElementById('cg-panel-body').innerHTML = buildConsumerGroupPanelBody(g, threshold);
+  }
+
+  async function refreshConsumerGroupPanel(groupId) {
+    const btn = document.getElementById('cg-panel-refresh');
+    if (btn) btn.disabled = true;
+    try {
+      await fetchConsumerGroupDetails(groupId);
+      const g = _data?.consumerGroups?.find(x => x.groupId === groupId);
+      if (g && _openCgGroupId === groupId) renderConsumerGroupPanelBody(g);
+      renderConsumerGroups();
+    } catch (e) {
+      console.error('Refresh failed:', e);
+      if (_openCgGroupId === groupId) {
+        document.getElementById('cg-panel-body').innerHTML =
+          `<p class="dz-meta" style="color:var(--danger)">Refresh failed: ${attrEsc(e.message)}</p>`;
+      }
+    }
+    if (btn) btn.disabled = false;
+  }
+
+  async function openConsumerGroupPanel(groupId) {
+    const g = _data?.consumerGroups?.find(x => x.groupId === groupId);
+    if (!g) return;
+
+    closeDebeziumPanel();
+    _openCgGroupId = groupId;
+
+    document.getElementById('cg-panel-title').textContent = groupId;
+    document.getElementById('cg-panel-sub').textContent = '';
+    document.getElementById('cg-panel-body').innerHTML =
+      '<div class="panel-loading"><span class="spinner"></span> Loading partition lags…</div>';
+
+    document.getElementById('side-overlay').classList.add('open');
+    document.getElementById('cg-side').classList.add('open');
+    document.getElementById('side-overlay').setAttribute('aria-hidden', 'false');
+    document.getElementById('cg-side').setAttribute('aria-hidden', 'false');
+    updateBodyScrollLock();
+
+    const refreshBtn = document.getElementById('cg-panel-refresh');
+    refreshBtn.onclick = () => refreshConsumerGroupPanel(groupId);
+
+    try {
+      let members = _memberDetailsCache[groupId] || g.memberAssignments;
+      if (!members?.length && (g.members || 0) > 0) {
+        members = await fetchConsumerGroupDetails(groupId);
+      }
+      renderConsumerGroupPanelBody(g);
+      renderConsumerGroups();
+    } catch (e) {
+      document.getElementById('cg-panel-body').innerHTML =
+        `<p class="dz-meta" style="color:var(--danger)">Failed to load: ${attrEsc(e.message)}</p>`;
+    }
+  }
+
+  function closeConsumerGroupPanel() {
+    _openCgGroupId = null;
+    document.getElementById('cg-side').classList.remove('open');
+    document.getElementById('cg-side').setAttribute('aria-hidden', 'true');
+    if (!document.getElementById('debezium-side').classList.contains('open')) {
+      document.getElementById('side-overlay').classList.remove('open');
+      document.getElementById('side-overlay').setAttribute('aria-hidden', 'true');
+    }
+    updateBodyScrollLock();
   }
 
   async function clearAlert(index) {
@@ -789,21 +915,24 @@
   function openDebeziumPanel(name) {
     const c = _data && _data.connectors && _data.connectors.find(x => x.name === name);
     if (!c) return;
+    closeConsumerGroupPanel();
     document.getElementById('debezium-panel-title').textContent = name;
     document.getElementById('debezium-panel-body').innerHTML = buildDebeziumPanelBody(c);
-    document.getElementById('debezium-overlay').classList.add('open');
+    document.getElementById('side-overlay').classList.add('open');
     document.getElementById('debezium-side').classList.add('open');
-    document.getElementById('debezium-overlay').setAttribute('aria-hidden', 'false');
+    document.getElementById('side-overlay').setAttribute('aria-hidden', 'false');
     document.getElementById('debezium-side').setAttribute('aria-hidden', 'false');
-    document.body.style.overflow = 'hidden';
+    updateBodyScrollLock();
   }
 
   function closeDebeziumPanel() {
-    document.getElementById('debezium-overlay').classList.remove('open');
     document.getElementById('debezium-side').classList.remove('open');
-    document.getElementById('debezium-overlay').setAttribute('aria-hidden', 'true');
     document.getElementById('debezium-side').setAttribute('aria-hidden', 'true');
-    document.body.style.overflow = '';
+    if (!document.getElementById('cg-side').classList.contains('open')) {
+      document.getElementById('side-overlay').classList.remove('open');
+      document.getElementById('side-overlay').setAttribute('aria-hidden', 'true');
+    }
+    updateBodyScrollLock();
   }
 
   // ── render connectors ──────────────────────────────────────────────────────
@@ -910,44 +1039,19 @@
       if (g.partitionUnbalanced) reasons.push(`unbalanced partitions (${g.partitionBalance?.min ?? '?'}-${g.partitionBalance?.max ?? '?'} per member)`);
 
       const members = _memberDetailsCache[g.groupId] || g.memberAssignments;
-      const membersHtml = members && members.length ? members.map(m => {
-        const topicList = [...(m.topics || [])].sort((a, b) => {
-          const la = a.lag != null ? Number(a.lag) : -1;
-          const lb = b.lag != null ? Number(b.lag) : -1;
-          return lb - la;
-        });
-        const topicsRows = topicList.map(t => {
-          const lagCell = t.lag != null ? fmtNum(t.lag) : '—';
-          const lagClass = t.lag > threshold ? ' lag-high' : '';
-          return `<tr><td>${attrEsc(t.topic)}</td><td>${t.partition}</td><td class="lag-cell ${lagClass}">${lagCell}</td></tr>`;
-        }).join('');
-        const topicsTable = topicsRows
-          ? `<table><thead><tr><th>Topic</th><th>Partition</th><th>Lag</th></tr></thead><tbody>${topicsRows}</tbody></table>`
-          : '<span class="topic-item">—</span>';
-        const memberLagStr = m.memberLag != null && m.memberLag > 0 ? ` • ${fmtNum(m.memberLag)} lag` : '';
-        const gid = JSON.stringify(g.groupId);
-        return `
-          <div class="member-row" onclick="toggleMemberTopics(this)">
-            <span class="cid" title="${attrEsc(m.consumerId)}">${attrEsc(m.consumerId)}</span>
-            <span class="partitions">${m.topics?.length || 0} partitions${memberLagStr}</span>
-            <div class="member-actions">
-              <button type="button" class="member-refresh-btn" title="Refresh partition lags (re-fetches this consumer group from Kafka; updates all members)"
-                onclick='event.stopPropagation(); refreshMemberLags(${gid}, this)'>↻</button>
-              <span class="chevron">▶</span>
-            </div>
-          </div>
-          <div class="member-topics">${topicsTable}</div>`;
-      }).join('') : '';
+      const assignmentCount = members?.reduce((n, m) => n + (m.topics?.length || 0), 0) ?? 0;
+      const hintBlock = (g.members || 0) > 0
+        ? `<div class="cg-card-hint">Click card for <strong>partition lags</strong>${
+            members?.length
+              ? ` · ${members.length} member(s), ${assignmentCount} assignment(s)`
+              : ' · loads on open'
+          }</div>`
+        : '';
 
-      const membersBlock = members && members.length
-        ? `<div class="members-block"><div class="label">Members — click row for topics · ↻ refresh lags</div>${membersHtml}</div>`
-        : (g.members > 0
-          ? `<button class="load-members-btn" data-load-members="${attrEsc(g.groupId)}" data-group-id="${attrEsc(g.groupId)}" onclick="loadMembers(this.dataset.groupId)">▶ Load member list</button>`
-          : '');
-
+      const enc = encodeURIComponent(g.groupId);
       return `
-        <div class="card ${unhealthy ? (g.state === 'DEAD' ? 'failed' : 'warning') : ''}">
-          <div class="name">${g.groupId}</div>
+        <div class="card cg-card ${unhealthy ? (g.state === 'DEAD' ? 'failed' : 'warning') : ''}" data-cg-enc="${attrEsc(enc)}" role="button" tabindex="0">
+          <div class="name">${attrEsc(g.groupId)}</div>
           <div class="row">
             <span>State</span>
             <span><span class="badge ${badgeGroup(g.state)}">${g.state || 'UNKNOWN'}</span>${reasons.length ? ' <span class="reasons-text">' + reasons.join(', ') + '</span>' : ''}</span>
@@ -955,7 +1059,7 @@
           <div class="row"><span>Members</span><span>${g.members ?? '—'}</span></div>
           <div class="row"><span>Topics</span><span>${g.topics ?? '—'}</span></div>
           ${g.partitionBalance ? `<div class="row"><span>Partition Balance</span><span>${g.partitionBalance.balanced ? '✓ even' : `⚠ ${g.partitionBalance.min}-${g.partitionBalance.max} per member`}</span></div>` : ''}
-          ${membersBlock}
+          ${hintBlock}
           <div class="row"><span>Consumer Lag</span><span class="lag-value ${lc}">${fmtNum(g.consumerLag)}</span></div>
           <div class="lag-bar-wrap"><div class="lag-bar ${lc}" style="width:${lw}%"></div></div>
           ${unhealthy ? `
@@ -1052,6 +1156,11 @@
     renderConnectors();
     renderConsumerGroups();
 
+    if (_openCgGroupId && document.getElementById('cg-side').classList.contains('open')) {
+      const g = (data.consumerGroups || []).find(x => x.groupId === _openCgGroupId);
+      if (g) renderConsumerGroupPanelBody(g);
+    }
+
     // Alerts
     const list = document.getElementById('alerts-list');
     const clearAllBtn = document.getElementById('clear-all-alerts');
@@ -1101,7 +1210,22 @@
   }
 
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') closeDebeziumPanel();
+    if (e.key === 'Escape') closeAllSidePanels();
+  });
+
+  document.getElementById('cg-grid').addEventListener('click', e => {
+    if (e.target.closest('.ack-btn, .ack-row')) return;
+    const card = e.target.closest('.cg-card');
+    if (!card || !card.dataset.cgEnc) return;
+    openConsumerGroupPanel(decodeURIComponent(card.dataset.cgEnc));
+  });
+
+  document.getElementById('cg-grid').addEventListener('keydown', e => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const card = e.target.closest('.cg-card');
+    if (!card || !card.dataset.cgEnc) return;
+    e.preventDefault();
+    openConsumerGroupPanel(decodeURIComponent(card.dataset.cgEnc));
   });
 
   document.getElementById('connectors-grid').addEventListener('click', e => {
