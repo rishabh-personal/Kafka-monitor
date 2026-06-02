@@ -227,7 +227,8 @@ let state = {
   brokers: null,       // [{ id, host, port, partitions, ... }] or null if unreachable
   brokerStatus: 'pending',  // ok | unreachable
   brokerError: null,
-  alerts: [],          // last 20 alert events
+  alerts: [],          // last 40 events (failure + recovery)
+  healthSnapshot: { brokerDown: false, connectors: [], consumers: [] },
   checkCount: 0,
   status: 'pending'    // pending | ok | alert | error
 };
@@ -523,8 +524,85 @@ function ackUrl(type, id, hours) {
   return `${APP_URL.replace(/\/$/, '')}/ack?type=${type}&id=${encodeURIComponent(id)}&hours=${hours}`;
 }
 
-async function sendSlackAlert(brokerDown, failedConnectors, totalConnectors, unhealthyGroups) {
+function ackLinksMarkdown(type, id) {
+  const u1 = ackUrl(type, id, 1);
+  const u2 = ackUrl(type, id, 2);
+  const u4 = ackUrl(type, id, 4);
+  const u12 = ackUrl(type, id, 12);
+  if (!u1) return '—';
+  return `<${u1}|1h> <${u2}|2h> <${u4}|4h> <${u12}|12h>`;
+}
+
+function pauseColLabel() {
+  return APP_URL ? '1h·2h·4h·12h' : '—';
+}
+
+function appendPerRowPauseLines(lines, type, items, idKey) {
+  if (!APP_URL || !items.length) return;
+  lines.push('');
+  lines.push('*Pause alerts (per row):*');
+  for (const item of items) {
+    const id = item[idKey];
+    lines.push(`• \`${id}\`: ${ackLinksMarkdown(type, id)}`);
+  }
+}
+
+function pushAlertEvent(event) {
+  state.alerts.unshift(event);
+  if (state.alerts.length > 40) state.alerts.pop();
+}
+
+function connectorAlertRow(c, cols, withPause = true) {
+  const name = c.name.length > cols.name ? c.name.slice(0, cols.name - 2) + '..' : c.name;
+  const status = (c.status?.state || 'UNKNOWN').slice(0, cols.status);
+  const connect = (c.connect || '-').length > cols.connect ? (c.connect || '-').slice(0, cols.connect - 2) + '..' : (c.connect || '-');
+  const pause = withPause && cols.pause ? ` | ${pad(pauseColLabel(), cols.pause)}` : '';
+  return `| ${pad(name, cols.name)} | ${pad(status, cols.status)} | ${pad(String(c.failed_tasks_count ?? 0), cols.failed)} | ${pad(connect, cols.connect)}${pause} |`;
+}
+
+function consumerAlertRow(g, cols, withPause = true) {
+  const groupId = g.groupId.length > cols.groupId ? g.groupId.slice(0, cols.groupId - 2) + '..' : g.groupId;
+  const st = (g.state || '-').slice(0, cols.state);
+  const members = String(g.members ?? 0);
+  const lag = (g.consumerLag != null && g.consumerLag > LAG_THRESHOLD) ? g.consumerLag.toLocaleString() : (g.consumerLag != null ? String(g.consumerLag) : '-');
+  const balance = g.partitionUnbalanced
+    ? (g.partitionBalance ? `${g.partitionBalance.min}-${g.partitionBalance.max}` : 'unbal')
+    : 'ok';
+  const pause = withPause && cols.pause ? ` | ${pad(pauseColLabel(), cols.pause)}` : '';
+  return `| ${pad(groupId, cols.groupId)} | ${pad(st, cols.state)} | ${pad(members, cols.members)} | ${pad(lag, cols.lag)} | ${pad(balance, cols.balance)}${pause} |`;
+}
+
+function toConnectorAlertItem(c) {
+  return {
+    name: c.name,
+    state: c.status?.state,
+    connect: c.connect,
+    failedTasks: c.failed_tasks_count ?? 0
+  };
+}
+
+function toConsumerAlertItem(g) {
+  return {
+    groupId: g.groupId,
+    state: g.state,
+    members: g.members,
+    consumerLag: g.consumerLag,
+    balance: g.partitionUnbalanced
+      ? (g.partitionBalance ? `${g.partitionBalance.min}-${g.partitionBalance.max}` : 'unbal')
+      : 'ok'
+  };
+}
+
+async function postSlack(text) {
   if (!SLACK_WEBHOOK) return;
+  await fetch(SLACK_WEBHOOK, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text })
+  });
+}
+
+async function sendSlackFailureAlert({ brokerDown, failedConnectors, totalConnectors, unhealthyGroups }) {
   const now = new Date().toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
   const lines = [];
 
@@ -540,23 +618,14 @@ async function sendSlackAlert(brokerDown, failedConnectors, totalConnectors, unh
     lines.push(`🚨 *Kafka Connector Alert* — ${failedConnectors.length} of ${totalConnectors} failing on \`${CLUSTER_NAME}\``);
     lines.push(`_Checked at ${now}_`);
     lines.push('');
-    const cols = { name: 28, status: 14, failed: 8, connect: 40 };
-    const sep = `|${'-'.repeat(cols.name + 2)}|${'-'.repeat(cols.status + 2)}|${'-'.repeat(cols.failed + 2)}|${'-'.repeat(cols.connect + 2)}|`;
+    const cols = { name: 28, status: 14, failed: 8, connect: 36, pause: 14 };
+    const sep = `|${'-'.repeat(cols.name + 2)}|${'-'.repeat(cols.status + 2)}|${'-'.repeat(cols.failed + 2)}|${'-'.repeat(cols.connect + 2)}|${'-'.repeat(cols.pause + 2)}|`;
     lines.push('```');
-    lines.push(`| ${pad('Connector', cols.name)} | ${pad('Status', cols.status)} | ${pad('Failed', cols.failed)} | ${pad('Connect', cols.connect)} |`);
+    lines.push(`| ${pad('Connector', cols.name)} | ${pad('Status', cols.status)} | ${pad('Failed', cols.failed)} | ${pad('Connect', cols.connect)} | ${pad('Pause', cols.pause)} |`);
     lines.push(sep);
-    for (const c of failedConnectors) {
-      const name = c.name.length > cols.name ? c.name.slice(0, cols.name - 2) + '..' : c.name;
-      const status = (c.status?.state || 'UNKNOWN').slice(0, cols.status);
-      const connect = (c.connect || '-').length > cols.connect ? (c.connect || '-').slice(0, cols.connect - 2) + '..' : (c.connect || '-');
-      lines.push(`| ${pad(name, cols.name)} | ${pad(status, cols.status)} | ${pad(String(c.failed_tasks_count ?? 0), cols.failed)} | ${pad(connect, cols.connect)} |`);
-    }
+    for (const c of failedConnectors) lines.push(connectorAlertRow(c, cols));
     lines.push('```');
-    const connAckParts = failedConnectors.map(c => {
-      const u1 = ackUrl('connector', c.name, 1), u2 = ackUrl('connector', c.name, 2), u4 = ackUrl('connector', c.name, 4), u12 = ackUrl('connector', c.name, 12);
-      return u1 && u2 ? `<${u1}|1h> <${u2}|2h> <${u4}|4h> <${u12}|12h>` : '';
-    }).filter(Boolean);
-    if (connAckParts.length) lines.push(`_Pause alerts:_ ${connAckParts.join(' | ')}`);
+    appendPerRowPauseLines(lines, 'connector', failedConnectors, 'name');
     lines.push(`🔗 <${KAFKA_UI_URL}/ui/clusters/${CLUSTER_NAME}/connectors|View Connectors>`);
   }
 
@@ -565,35 +634,58 @@ async function sendSlackAlert(brokerDown, failedConnectors, totalConnectors, unh
     lines.push(`⚠️ *Kafka Consumer Alert* — ${unhealthyGroups.length} unhealthy group(s) on \`${CLUSTER_NAME}\``);
     lines.push(`_Checked at ${now}_`);
     lines.push('');
-    const cols = { groupId: 38, state: 10, members: 8, lag: 12, balance: 12 };
-    const sep = `|${'-'.repeat(cols.groupId + 2)}|${'-'.repeat(cols.state + 2)}|${'-'.repeat(cols.members + 2)}|${'-'.repeat(cols.lag + 2)}|${'-'.repeat(cols.balance + 2)}|`;
+    const cols = { groupId: 34, state: 10, members: 8, lag: 12, balance: 10, pause: 14 };
+    const sep = `|${'-'.repeat(cols.groupId + 2)}|${'-'.repeat(cols.state + 2)}|${'-'.repeat(cols.members + 2)}|${'-'.repeat(cols.lag + 2)}|${'-'.repeat(cols.balance + 2)}|${'-'.repeat(cols.pause + 2)}|`;
     lines.push('```');
-    lines.push(`| ${pad('Consumer Group', cols.groupId)} | ${pad('State', cols.state)} | ${pad('Members', cols.members)} | ${pad('Lag', cols.lag)} | ${pad('Balance', cols.balance)} |`);
+    lines.push(`| ${pad('Consumer Group', cols.groupId)} | ${pad('State', cols.state)} | ${pad('Members', cols.members)} | ${pad('Lag', cols.lag)} | ${pad('Balance', cols.balance)} | ${pad('Pause', cols.pause)} |`);
     lines.push(sep);
-    for (const g of unhealthyGroups) {
-      const groupId = g.groupId.length > cols.groupId ? g.groupId.slice(0, cols.groupId - 2) + '..' : g.groupId;
-      const state = (g.state || '-').slice(0, cols.state);
-      const members = String(g.members ?? 0);
-      const lag = g.consumerLag > LAG_THRESHOLD ? g.consumerLag.toLocaleString() : '-';
-      const balance = g.partitionUnbalanced
-        ? (g.partitionBalance ? `${g.partitionBalance.min}-${g.partitionBalance.max}` : 'unbal')
-        : 'ok';
-      lines.push(`| ${pad(groupId, cols.groupId)} | ${pad(state, cols.state)} | ${pad(members, cols.members)} | ${pad(lag, cols.lag)} | ${pad(balance, cols.balance)} |`);
-    }
+    for (const g of unhealthyGroups) lines.push(consumerAlertRow(g, cols));
     lines.push('```');
-    const ackParts = unhealthyGroups.map(g => {
-      const u1 = ackUrl('consumer', g.groupId, 1), u2 = ackUrl('consumer', g.groupId, 2), u4 = ackUrl('consumer', g.groupId, 4), u12 = ackUrl('consumer', g.groupId, 12);
-      return u1 && u2 ? `<${u1}|1h> <${u2}|2h> <${u4}|4h> <${u12}|12h>` : '';
-    }).filter(Boolean);
-    if (ackParts.length) lines.push(`_Pause alerts:_ ${ackParts.join(' | ')}`);
+    appendPerRowPauseLines(lines, 'consumer', unhealthyGroups, 'groupId');
     lines.push(`🔗 <${KAFKA_UI_URL}/ui/clusters/${CLUSTER_NAME}/consumer-groups|View Consumer Groups>`);
   }
 
-  await fetch(SLACK_WEBHOOK, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text: lines.join('\n') })
-  });
+  if (lines.length) await postSlack(lines.join('\n'));
+}
+
+async function sendSlackRecoveryAlert({ brokerRecovered, recoveredConnectors, recoveredConsumers }) {
+  const now = new Date().toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+  const lines = [];
+  const total = (brokerRecovered ? 1 : 0) + recoveredConnectors.length + recoveredConsumers.length;
+  lines.push(`✅ *Kafka Recovery* — ${total} item(s) healthy again on \`${CLUSTER_NAME}\``);
+  lines.push(`_Checked at ${now}_`);
+  lines.push('');
+
+  if (brokerRecovered) {
+    lines.push('• *Cluster brokers* — reachable again');
+    lines.push(`🔗 <${KAFKA_UI_URL}/ui/clusters/${CLUSTER_NAME}|View in Kafka UI>`);
+    lines.push('');
+  }
+
+  if (recoveredConnectors.length > 0) {
+    const cols = { name: 28, status: 14, failed: 8, connect: 36 };
+    const sep = `|${'-'.repeat(cols.name + 2)}|${'-'.repeat(cols.status + 2)}|${'-'.repeat(cols.failed + 2)}|${'-'.repeat(cols.connect + 2)}|`;
+    lines.push(`*Connectors recovered (${recoveredConnectors.length}):*`);
+    lines.push('```');
+    lines.push(`| ${pad('Connector', cols.name)} | ${pad('Status', cols.status)} | ${pad('Failed', cols.failed)} | ${pad('Connect', cols.connect)} |`);
+    lines.push(sep);
+    for (const c of recoveredConnectors) lines.push(connectorAlertRow(c, cols, false));
+    lines.push('```');
+  }
+
+  if (recoveredConsumers.length > 0) {
+    const cols = { groupId: 34, state: 10, members: 8, lag: 12, balance: 10 };
+    const sep = `|${'-'.repeat(cols.groupId + 2)}|${'-'.repeat(cols.state + 2)}|${'-'.repeat(cols.members + 2)}|${'-'.repeat(cols.lag + 2)}|${'-'.repeat(cols.balance + 2)}|`;
+    lines.push(`*Consumer groups recovered (${recoveredConsumers.length}):*`);
+    lines.push('```');
+    lines.push(`| ${pad('Consumer Group', cols.groupId)} | ${pad('State', cols.state)} | ${pad('Members', cols.members)} | ${pad('Lag', cols.lag)} | ${pad('Balance', cols.balance)} |`);
+    lines.push(sep);
+    for (const g of recoveredConsumers) lines.push(consumerAlertRow(g, cols, false));
+    lines.push('```');
+    lines.push(`🔗 <${KAFKA_UI_URL}/ui/clusters/${CLUSTER_NAME}/consumer-groups|View Consumer Groups>`);
+  }
+
+  await postSlack(lines.join('\n'));
 }
 
 // ── Core: run a health check ───────────────────────────────────────────────
@@ -671,23 +763,61 @@ async function runCheck() {
     const toAlertConns = failedConnectors.filter(c => !isAcknowledged('connector', c.name));
     const toAlertCons  = unhealthyGroups.filter(g => !isAcknowledged('consumer', g.groupId));
 
-    if (brokerDown || toAlertConns.length > 0 || toAlertCons.length > 0) {
-      await sendSlackAlert(brokerDown, toAlertConns, connectors.length, toAlertCons);
-      const event = {
+    const prev = state.healthSnapshot || { brokerDown: false, connectors: [], consumers: [] };
+    const curConnNames = failedConnectors.map(c => c.name);
+    const curConsIds = unhealthyGroups.map(g => g.groupId);
+    const recoveredConnectorNames = prev.connectors.filter(n => !curConnNames.includes(n));
+    const recoveredConsumerIds = prev.consumers.filter(id => !curConsIds.includes(id));
+    const brokerRecovered = prev.brokerDown && !brokerDown;
+
+    const recoveredConnectors = recoveredConnectorNames.map(name => {
+      const c = connectors.find(x => x.name === name);
+      return c || { name, status: { state: 'RUNNING' }, connect: '—', failed_tasks_count: 0 };
+    });
+    const recoveredConsumers = recoveredConsumerIds.map(id => {
+      const g = consumerGroups.find(x => x.groupId === id);
+      return g || { groupId: id, state: 'STABLE', members: 0, consumerLag: 0 };
+    });
+
+    const hasFailureAlert = brokerDown || toAlertConns.length > 0 || toAlertCons.length > 0;
+    const hasRecovery = brokerRecovered || recoveredConnectors.length > 0 || recoveredConsumers.length > 0;
+
+    if (hasFailureAlert) {
+      await sendSlackFailureAlert({
+        brokerDown,
+        failedConnectors: toAlertConns,
+        totalConnectors: connectors.length,
+        unhealthyGroups: toAlertCons
+      });
+      pushAlertEvent({
+        kind: 'failure',
         time: state.lastChecked,
         brokerDown: brokerDown ? 1 : 0,
-        connectorCount: failedConnectors.length,
-        consumerCount: unhealthyGroups.length,
-        names: [
-          ...(brokerDown ? ['broker:cluster-unreachable'] : []),
-          ...failedConnectors.map(c => `connector:${c.name}`),
-          ...unhealthyGroups.map(g => `consumer:${g.groupId}`)
-        ]
-      };
-      state.alerts.unshift(event);
-      if (state.alerts.length > 20) state.alerts.pop();
-      console.log(`[ALERT] ${brokerDown ? 'Broker unreachable | ' : ''}Connectors: ${failedConnectors.length} failed | Consumers: ${unhealthyGroups.length} unhealthy`);
-    } else {
+        connectors: toAlertConns.map(toConnectorAlertItem),
+        consumers: toAlertCons.map(toConsumerAlertItem)
+      });
+      console.log(`[ALERT] ${brokerDown ? 'Broker unreachable | ' : ''}Connectors: ${toAlertConns.length} failing | Consumers: ${toAlertCons.length} unhealthy`);
+    }
+
+    if (hasRecovery) {
+      await sendSlackRecoveryAlert({ brokerRecovered, recoveredConnectors, recoveredConsumers });
+      pushAlertEvent({
+        kind: 'recovery',
+        time: state.lastChecked,
+        brokerRecovered: brokerRecovered ? 1 : 0,
+        connectors: recoveredConnectors.map(toConnectorAlertItem),
+        consumers: recoveredConsumers.map(toConsumerAlertItem)
+      });
+      console.log(`[RECOVERY] Broker: ${brokerRecovered ? 'yes' : 'no'} | Connectors: ${recoveredConnectors.length} | Consumers: ${recoveredConsumers.length}`);
+    }
+
+    state.healthSnapshot = {
+      brokerDown,
+      connectors: curConnNames,
+      consumers: curConsIds
+    };
+
+    if (!hasFailureAlert && !hasRecovery) {
       console.log(`[OK] Brokers: ${state.brokers?.length ?? 0} | ${connectors.length} connectors | ${consumerGroups.length} consumer groups — all healthy.`);
     }
   } catch (err) {
