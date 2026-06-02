@@ -299,8 +299,9 @@
     .ack-btn:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
     .ack-badge { color: var(--success); font-weight: 500; }
 
-    .alerts-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+    .alerts-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; gap: 12px; }
     .alerts-header .section-title { margin: 0; margin-top: 32px; }
+    .alert-tabs { display: flex; gap: 8px; flex-wrap: wrap; }
     .clear-all-btn {
       font-size: 0.75rem; color: var(--text-muted); background: none; border: none; cursor: pointer;
       padding: 4px 8px; font-weight: 500;
@@ -322,9 +323,29 @@
       padding: 14px 18px;
       font-size: 0.8rem;
     }
-
-    .alert-item .time  { color: var(--text-muted); margin-bottom: 6px; }
+    .alert-item.recovery {
+      background: var(--success-bg);
+      border-color: rgba(52, 211, 153, 0.35);
+    }
+    .alert-item .time  { color: var(--text-muted); margin-bottom: 8px; }
+    .alert-item .alert-kind {
+      font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 10px;
+    }
+    .alert-item.failure .alert-kind { color: var(--danger); }
+    .alert-item.recovery .alert-kind { color: var(--success); }
     .alert-item .names { color: var(--danger); font-weight: 600; }
+    .alert-item.recovery .names { color: var(--success); }
+    .alert-detail-table { width: 100%; border-collapse: collapse; font-size: 0.75rem; margin-top: 8px; table-layout: fixed; }
+    .alert-detail-table th, .alert-detail-table td {
+      padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top;
+      overflow-wrap: anywhere; word-break: break-word;
+    }
+    .alert-detail-table th { color: var(--text-muted); font-weight: 600; font-size: 0.68rem; text-transform: uppercase; }
+    .alert-detail-table .col-topic-name { width: 38%; }
+    .alert-detail-table .col-lag { text-align: right; white-space: nowrap; width: 12%; }
+    .alert-detail-table .col-pause { width: 28%; white-space: nowrap; }
+    .alert-subtitle { font-size: 0.72rem; font-weight: 600; color: var(--text-muted); margin: 10px 0 4px; text-transform: uppercase; letter-spacing: 0.05em; }
+    .alert-table-wrap { overflow-x: auto; margin-bottom: 4px; }
 
     .empty {
       color: var(--text-dim);
@@ -575,6 +596,11 @@
 <!-- Alerts -->
 <div class="alerts-header">
   <span class="section-title">Recent Alerts</span>
+  <div class="alert-tabs">
+    <button class="filter-btn active" id="alert-tab-all" onclick="setAlertTab('all')">All</button>
+    <button class="filter-btn" id="alert-tab-failure" onclick="setAlertTab('failure')">Failures</button>
+    <button class="filter-btn" id="alert-tab-recovery" onclick="setAlertTab('recovery')">Recoveries</button>
+  </div>
   <button class="clear-all-btn" id="clear-all-alerts" onclick="clearAllAlerts()" style="display:none">Clear all</button>
 </div>
 <div class="alerts-list" id="alerts-list">
@@ -584,6 +610,7 @@
 <script>
   let _data = null;
   let _cgFilter = 'all';
+  let _alertTab = 'all';
   let _memberDetailsCache = {};
   let _openCgGroupId = null;
 
@@ -778,6 +805,121 @@
     } catch (e) {
       console.error('Ack failed:', e);
     }
+  }
+
+  function setAlertTab(tab) {
+    _alertTab = tab;
+    ['all', 'failure', 'recovery'].forEach(t => {
+      const el = document.getElementById(`alert-tab-${t}`);
+      if (el) el.classList.toggle('active', t === tab);
+    });
+    if (_data) renderAlerts(_data);
+  }
+
+  function alertAckButtons(type, id) {
+    return `
+      <button class="ack-btn" data-ack-type="${type}" data-ack-id="${attrEsc(id)}" onclick="ack(this.dataset.ackType,this.dataset.ackId,1)">1h</button>
+      <button class="ack-btn" data-ack-type="${type}" data-ack-id="${attrEsc(id)}" onclick="ack(this.dataset.ackType,this.dataset.ackId,2)">2h</button>
+      <button class="ack-btn" data-ack-type="${type}" data-ack-id="${attrEsc(id)}" onclick="ack(this.dataset.ackType,this.dataset.ackId,4)">4h</button>
+      <button class="ack-btn" data-ack-type="${type}" data-ack-id="${attrEsc(id)}" onclick="ack(this.dataset.ackType,this.dataset.ackId,12)">12h</button>`;
+  }
+
+  function renderAlertConnectorTable(connectors, showPause) {
+    if (!connectors?.length) return '';
+    const rows = connectors.map(c => `
+      <tr>
+        <td class="col-topic-name">${attrEsc(c.name)}</td>
+        <td>${attrEsc(c.state || '—')}</td>
+        <td>${c.failedTasks ?? 0}</td>
+        <td>${attrEsc(c.connect || '—')}</td>
+        ${showPause ? `<td class="col-pause">${alertAckButtons('connector', c.name)}</td>` : ''}
+      </tr>`).join('');
+    return `<div class="alert-table-wrap"><table class="alert-detail-table">
+      <thead><tr>
+        <th class="col-topic-name">Connector</th><th>Status</th><th>Failed</th><th>Connect</th>
+        ${showPause ? '<th class="col-pause">Pause alerts</th>' : ''}
+      </tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
+
+  function renderAlertConsumerTable(consumers, showPause) {
+    if (!consumers?.length) return '';
+    const rows = consumers.map(g => `
+      <tr>
+        <td class="col-topic-name">${attrEsc(g.groupId)}</td>
+        <td>${attrEsc(g.state || '—')}</td>
+        <td>${g.members ?? '—'}</td>
+        <td class="col-lag">${g.consumerLag != null ? fmtNum(g.consumerLag) : '—'}</td>
+        <td>${attrEsc(g.balance || 'ok')}</td>
+        ${showPause ? `<td class="col-pause">${alertAckButtons('consumer', g.groupId)}</td>` : ''}
+      </tr>`).join('');
+    return `<div class="alert-table-wrap"><table class="alert-detail-table">
+      <thead><tr>
+        <th class="col-topic-name">Consumer group</th><th>State</th><th>Members</th><th>Lag</th><th>Balance</th>
+        ${showPause ? '<th class="col-pause">Pause alerts</th>' : ''}
+      </tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
+
+  function renderAlertEvent(a, index) {
+    const kind = a.kind || 'failure';
+    const isRecovery = kind === 'recovery';
+    const showPause = !isRecovery;
+
+    if (!a.kind && a.names && !a.connectors && !a.consumers) {
+      return `
+        <div class="alert-item failure">
+          <button class="alert-clear-btn" onclick="clearAlert(${index})" title="Clear">×</button>
+          <div class="time">🕐 ${new Date(a.time).toLocaleString()}</div>
+          <div class="names">${(a.names || []).map(attrEsc).join(', ')}</div>
+        </div>`;
+    }
+
+    let body = '';
+    if (a.brokerDown) body += '<div class="alert-subtitle">Cluster brokers unreachable</div>';
+    if (a.brokerRecovered) body += '<div class="alert-subtitle">Cluster brokers recovered</div>';
+    if (a.connectors?.length) {
+      body += `<div class="alert-subtitle">Connectors (${a.connectors.length})</div>`;
+      body += renderAlertConnectorTable(a.connectors, showPause);
+    }
+    if (a.consumers?.length) {
+      body += `<div class="alert-subtitle">Consumer groups (${a.consumers.length})</div>`;
+      body += renderAlertConsumerTable(a.consumers, showPause);
+    }
+
+    const label = isRecovery ? '✅ Recovery' : '🚨 Failure';
+    return `
+      <div class="alert-item ${kind}">
+        <button class="alert-clear-btn" onclick="clearAlert(${index})" title="Clear">×</button>
+        <div class="time">🕐 ${new Date(a.time).toLocaleString()}</div>
+        <div class="alert-kind">${label}</div>
+        ${body}
+      </div>`;
+  }
+
+  function renderAlerts(data) {
+    const list = document.getElementById('alerts-list');
+    const clearAllBtn = document.getElementById('clear-all-alerts');
+    const alerts = data.alerts || [];
+    const filtered = alerts.filter(a => {
+      const k = a.kind || 'failure';
+      if (_alertTab === 'all') return true;
+      return k === _alertTab;
+    });
+
+    if (!alerts.length) {
+      list.innerHTML = '<div class="empty">No alerts fired yet.</div>';
+      if (clearAllBtn) clearAllBtn.style.display = 'none';
+      return;
+    }
+    if (clearAllBtn) clearAllBtn.style.display = 'inline-block';
+    if (!filtered.length) {
+      list.innerHTML = `<div class="empty">No ${_alertTab === 'all' ? '' : _alertTab + ' '}alerts in this view.</div>`;
+      return;
+    }
+
+    list.innerHTML = filtered.map(a => {
+      const index = alerts.indexOf(a);
+      return renderAlertEvent(a, index);
+    }).join('');
   }
 
   function ackUntil(type, id) {
@@ -1161,24 +1303,7 @@
       if (g) renderConsumerGroupPanelBody(g);
     }
 
-    // Alerts
-    const list = document.getElementById('alerts-list');
-    const clearAllBtn = document.getElementById('clear-all-alerts');
-    if (!data.alerts || !data.alerts.length) {
-      list.innerHTML = '<div class="empty">No alerts fired yet.</div>';
-      if (clearAllBtn) clearAllBtn.style.display = 'none';
-    } else {
-      if (clearAllBtn) clearAllBtn.style.display = 'inline-block';
-      list.innerHTML = data.alerts.map((a, i) => `
-        <div class="alert-item">
-          <button class="alert-clear-btn" onclick="clearAlert(${i})" title="Clear this alert">×</button>
-          <div class="time">🕐 ${new Date(a.time).toLocaleString()}
-            ${a.connectorCount ? ` — ${a.connectorCount} connector(s)` : ''}
-            ${a.consumerCount  ? ` — ${a.consumerCount} consumer group(s)` : ''}
-          </div>
-          <div class="names">${(a.names || []).join(', ')}</div>
-        </div>`).join('');
-    }
+    renderAlerts(data);
   }
 
   // ── load & poll ────────────────────────────────────────────────────────────
