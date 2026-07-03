@@ -10,19 +10,58 @@ const fetch = require('node-fetch');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ── Config (set as environment variables in DigitalOcean) ──────────────────
-const KAFKA_UI_URL    = process.env.KAFKA_UI_URL    || 'https://kafka-ui.prod.zwing.in';
-const CLUSTER_NAME    = process.env.CLUSTER_NAME    || 'central-zwing';
-const UI_PASSWORD     = process.env.UI_PASSWORD;      // optional: if set, UI requires login
+// ── Kafbat UI (formerly Kafka UI) ───────────────────────────────────────────
+const KAFKA_UI_URL    = (process.env.KAFKA_UI_URL || 'https://jio-kafka-ui.prod.zwing.in').replace(/\/$/, '');
+const CLUSTER_NAME_REQUESTED = (process.env.CLUSTER_NAME || '').trim();
+let clusterName = CLUSTER_NAME_REQUESTED || 'kafka-prod';
+const UI_PASSWORD     = process.env.UI_PASSWORD;      // optional: if set, dashboard requires login
 const SESSION_SECRET  = process.env.SESSION_SECRET || 'kafka-monitor-default-change-in-prod';
 const SLACK_WEBHOOK   = process.env.SLACK_WEBHOOK;
 const CHECK_INTERVAL  = process.env.CHECK_INTERVAL  || '*/15 * * * *'; // every 15 min
-const KAFKA_UI_USER   = process.env.KAFKA_UI_USER   || 'admin';
-const KAFKA_UI_PASS   = process.env.KAFKA_UI_PASS   || 'prodkafka@admin@123';
-const LAG_THRESHOLD   = parseInt(process.env.LAG_THRESHOLD || '10000', 10); // alert if lag > this
-const CHECK_BALANCE   = process.env.CHECK_PARTITION_BALANCE !== 'false'; // verify partition distribution across members
-const CHECK_DEBEZIUM_TOPICS = process.env.CHECK_DEBEZIUM_TOPICS !== 'false'; // verify Debezium expected topics exist in Kafka
-const APP_URL         = process.env.APP_URL || ''; // public URL for ack links in Slack (e.g. https://your-app.ondigitalocean.app)
+const KAFKA_UI_USER   = process.env.KAFKA_UI_USER   || '';
+const KAFKA_UI_PASS   = process.env.KAFKA_UI_PASS   || '';
+// GitHub OAuth (Kafbat): copy session cookie from browser DevTools after signing in
+const KAFKA_UI_SESSION_COOKIE = process.env.KAFKA_UI_SESSION_COOKIE || '';
+// Optional: bearer JWT if Kafbat resource-server auth is configured
+const KAFKA_UI_BEARER_TOKEN   = process.env.KAFKA_UI_BEARER_TOKEN   || '';
+const LAG_THRESHOLD   = parseInt(process.env.LAG_THRESHOLD || '10000', 10); // default lag SLO
+const LAG_VELOCITY_THRESHOLD = parseInt(process.env.LAG_VELOCITY_THRESHOLD || '5000', 10); // lag increase per check → alert
+const STUCK_OFFSET_MIN_LAG = parseInt(
+  process.env.STUCK_OFFSET_MIN_LAG || String(Math.max(500, Math.floor(parseInt(process.env.LAG_THRESHOLD || '10000', 10) / 10))),
+  10
+);
+const STUCK_OFFSET_CHECKS = parseInt(process.env.STUCK_OFFSET_CHECKS || '2', 10);
+const CHECK_BALANCE   = process.env.CHECK_PARTITION_BALANCE !== 'false';
+const CHECK_DEBEZIUM_TOPICS = process.env.CHECK_DEBEZIUM_TOPICS !== 'false';
+const CHECK_ORPHAN_TOPICS = process.env.CHECK_ORPHAN_TOPICS !== 'false';
+const ORPHAN_ZOMBIE_SCAN = process.env.ORPHAN_ZOMBIE_SCAN === 'true';
+const ORPHAN_TOPIC_SCAN_LIMIT = parseInt(process.env.ORPHAN_TOPIC_SCAN_LIMIT || '50', 10);
+const APP_URL         = process.env.APP_URL || '';
+
+function parseLagSloOverrides(raw) {
+  const map = {};
+  if (!raw?.trim()) return map;
+  for (const part of raw.split(',')) {
+    const idx = part.indexOf(':');
+    if (idx <= 0) continue;
+    const key = part.slice(0, idx).trim();
+    const val = parseInt(part.slice(idx + 1).trim(), 10);
+    if (key && !Number.isNaN(val)) map[key] = val;
+  }
+  return map;
+}
+
+const LAG_SLO_OVERRIDES = parseLagSloOverrides(process.env.LAG_SLO_OVERRIDES || '');
+
+function sloForGroup(groupId) {
+  if (LAG_SLO_OVERRIDES[groupId] != null) return LAG_SLO_OVERRIDES[groupId];
+  for (const [pattern, val] of Object.entries(LAG_SLO_OVERRIDES)) {
+    if (!pattern.includes('*')) continue;
+    const re = new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`);
+    if (re.test(groupId)) return val;
+  }
+  return LAG_THRESHOLD;
+}
 
 // ── Acknowledgement store (pause alerts for 1, 2, 4 or 12 hours) ─────────────
 const ACKS_FILE = path.join(__dirname, 'data', 'acks.json');
@@ -179,44 +218,194 @@ function getLoginPage(invalid, redirect) {
 </html>`;
 }
 
-// ── Session cookie cache ────────────────────────────────────────────────────
-let sessionCookie = null;
+// ── Kafbat UI session (OAuth cookie or form login) ──────────────────────────
+let sessionCookie = KAFKA_UI_SESSION_COOKIE.trim() || null;
+let kafbatAuthType = null; // OAUTH2 | LOGIN_FORM | DISABLED
 
-async function login() {
-  const res = await fetch(`${KAFKA_UI_URL}/auth`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: `username=${encodeURIComponent(KAFKA_UI_USER)}&password=${encodeURIComponent(KAFKA_UI_PASS)}`,
-    redirect: 'manual',
-    timeout: 15000
-  });
-  const setCookie = res.headers.raw()['set-cookie'];
-  if (!setCookie) throw new Error('Login failed: no session cookie returned');
-  sessionCookie = setCookie.map(c => c.split(';')[0]).join('; ');
-  console.log('[AUTH] Logged in, session cookie obtained.');
+async function fetchKafbatAuthSettings() {
+  try {
+    const res = await fetch(`${KAFKA_UI_URL}/api/config/authentication`, { timeout: 15000 });
+    if (!res.ok) return null;
+    return res.json();
+  } catch (err) {
+    console.warn('[AUTH] Could not read Kafbat auth settings:', err.message);
+    return null;
+  }
 }
 
-async function apiFetch(url) {
-  if (!sessionCookie && KAFKA_UI_USER) await login();
+function kafbatAuthHeaders() {
+  const headers = {};
+  if (KAFKA_UI_BEARER_TOKEN) {
+    headers.Authorization = `Bearer ${KAFKA_UI_BEARER_TOKEN}`;
+  } else if (sessionCookie) {
+    headers.Cookie = sessionCookie;
+  }
+  return headers;
+}
 
-  let res = await fetch(url, {
-    headers: sessionCookie ? { Cookie: sessionCookie } : {},
-    redirect: 'manual',
-    timeout: 15000
-  });
+function oauthSessionHelp() {
+  return [
+    'Kafbat UI uses GitHub OAuth — username/password login is not available.',
+    'Sign in at ' + KAFKA_UI_URL + ' via GitHub, then copy your session cookie',
+    '(DevTools → Application → Cookies → copy the SESSION value, or the full Cookie header)',
+    'and set KAFKA_UI_SESSION_COOKIE in your environment.',
+    'Alternatively, configure Kafbat JWT resource-server auth and set KAFKA_UI_BEARER_TOKEN.'
+  ].join(' ');
+}
 
-  // Session expired — re-login and retry once
-  if ((res.status === 401 || res.status === 302) && KAFKA_UI_USER) {
-    await login();
-    res = await fetch(url, {
-      headers: { Cookie: sessionCookie },
+async function loginForm() {
+  if (!KAFKA_UI_USER || !KAFKA_UI_PASS) {
+    throw new Error('KAFKA_UI_USER and KAFKA_UI_PASS are required for form-based Kafbat login.');
+  }
+
+  for (const path of ['/login', '/auth']) {
+    const res = await fetch(`${KAFKA_UI_URL}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `username=${encodeURIComponent(KAFKA_UI_USER)}&password=${encodeURIComponent(KAFKA_UI_PASS)}`,
       redirect: 'manual',
       timeout: 15000
     });
+    const setCookie = res.headers.raw()['set-cookie'];
+    if (setCookie?.length) {
+      sessionCookie = setCookie.map(c => c.split(';')[0]).join('; ');
+      console.log(`[AUTH] Logged in to Kafbat via ${path}.`);
+      return;
+    }
+  }
+  throw new Error('Kafbat form login failed: no session cookie returned.');
+}
+
+async function ensureKafbatAuthenticated() {
+  if (kafbatAuthType === 'DISABLED') return;
+  if (KAFKA_UI_BEARER_TOKEN || sessionCookie) return;
+  if (kafbatAuthType === 'OAUTH2') throw new Error(oauthSessionHelp());
+  if (KAFKA_UI_USER && KAFKA_UI_PASS) {
+    await loginForm();
+    return;
+  }
+  throw new Error('Kafbat UI credentials not configured.');
+}
+
+function isOAuthRedirect(res) {
+  if (res.status !== 302 && res.status !== 303) return false;
+  const loc = res.headers.get('location') || '';
+  return loc.includes('oauth2/authorization') || loc.includes('/login');
+}
+
+async function initKafbatAuth() {
+  const settings = await fetchKafbatAuthSettings();
+  kafbatAuthType = settings?.authType || null;
+
+  if (kafbatAuthType === 'OAUTH2') {
+    const provider = settings?.oAuthProviders?.[0]?.clientName || 'OAuth';
+    if (KAFKA_UI_BEARER_TOKEN) {
+      console.log(`[AUTH] Kafbat ${provider} — using KAFKA_UI_BEARER_TOKEN.`);
+    } else if (sessionCookie) {
+      console.log(`[AUTH] Kafbat ${provider} — using KAFKA_UI_SESSION_COOKIE.`);
+    } else {
+      console.warn('[AUTH] Kafbat uses ' + provider + '. ' + oauthSessionHelp());
+    }
+    return;
   }
 
-  if (!res.ok) throw new Error(`Kafka UI returned ${res.status} for ${url}`);
+  if (kafbatAuthType === 'LOGIN_FORM' && KAFKA_UI_USER && KAFKA_UI_PASS) {
+    await loginForm();
+    return;
+  }
+
+  if (kafbatAuthType === 'DISABLED') {
+    console.log('[AUTH] Kafbat authentication disabled.');
+    return;
+  }
+
+  if (sessionCookie) {
+    console.log('[AUTH] Using KAFKA_UI_SESSION_COOKIE.');
+  } else if (KAFKA_UI_USER && KAFKA_UI_PASS) {
+    await loginForm();
+  }
+}
+
+async function apiFetch(url) {
+  await ensureKafbatAuthenticated();
+
+  let res = await fetch(url, {
+    headers: kafbatAuthHeaders(),
+    redirect: 'manual',
+    timeout: 15000
+  });
+
+  if (isOAuthRedirect(res)) {
+    if (kafbatAuthType === 'OAUTH2') {
+      throw new Error('Kafbat session expired or invalid. Refresh KAFKA_UI_SESSION_COOKIE after signing in via GitHub.');
+    }
+    if (KAFKA_UI_USER && KAFKA_UI_PASS) {
+      await loginForm();
+      res = await fetch(url, { headers: kafbatAuthHeaders(), redirect: 'manual', timeout: 15000 });
+    } else {
+      throw new Error(`Kafbat UI authentication required for ${url}`);
+    }
+  }
+
+  // Form login session expired — re-login and retry once
+  if ((res.status === 401 || res.status === 403) && KAFKA_UI_USER && KAFKA_UI_PASS && !KAFKA_UI_BEARER_TOKEN) {
+    await loginForm();
+    res = await fetch(url, { headers: kafbatAuthHeaders(), redirect: 'manual', timeout: 15000 });
+  }
+
+  if (!res.ok) throw new Error(`Kafbat UI returned ${res.status} for ${url}`);
   return res.json();
+}
+
+async function fetchKafbatClusters() {
+  await ensureKafbatAuthenticated();
+  const res = await fetch(`${KAFKA_UI_URL}/api/clusters`, {
+    headers: kafbatAuthHeaders(),
+    redirect: 'manual',
+    timeout: 15000
+  });
+  if (isOAuthRedirect(res)) {
+    throw new Error('Kafbat session expired or invalid. Refresh KAFKA_UI_SESSION_COOKIE after signing in via GitHub.');
+  }
+  if (!res.ok) throw new Error(`Kafbat UI returned ${res.status} when listing clusters`);
+  return res.json();
+}
+
+function pickClusterName(clusters, requested) {
+  const names = clusters.map(c => c.name).filter(Boolean);
+  if (!names.length) throw new Error('No Kafka clusters configured in Kafbat UI.');
+
+  if (requested) {
+    const match = clusters.find(c => c.name === requested);
+    if (match) return { name: match.name, auto: false };
+    console.warn(`[CLUSTER] CLUSTER_NAME="${requested}" not found. Available: ${names.join(', ')}`);
+  }
+
+  const defaultCluster = clusters.find(c => c.defaultCluster);
+  if (defaultCluster) return { name: defaultCluster.name, auto: true, reason: 'default cluster' };
+
+  const online = clusters.filter(c => c.status === 'ONLINE');
+  if (online.length === 1) return { name: online[0].name, auto: true, reason: 'single online cluster' };
+  if (clusters.length === 1) return { name: clusters[0].name, auto: true, reason: 'only cluster' };
+
+  if (online.length > 1) {
+    console.warn(`[CLUSTER] Multiple online clusters (${online.map(c => c.name).join(', ')}). Using "${online[0].name}". Set CLUSTER_NAME to pick one.`);
+    return { name: online[0].name, auto: true, reason: 'first online cluster' };
+  }
+
+  throw new Error(`Could not resolve cluster. Set CLUSTER_NAME to one of: ${names.join(', ')}`);
+}
+
+async function initKafbatCluster() {
+  const clusters = await fetchKafbatClusters();
+  const picked = pickClusterName(clusters, CLUSTER_NAME_REQUESTED);
+  clusterName = picked.name;
+  if (picked.auto) {
+    const available = clusters.map(c => `${c.name}${c.status === 'ONLINE' ? '' : ` (${c.status})`}`).join(', ');
+    console.log(`[CLUSTER] Using "${clusterName}" (${picked.reason}). Available: ${available}`);
+  } else {
+    console.log(`[CLUSTER] Using "${clusterName}" from CLUSTER_NAME.`);
+  }
 }
 
 // ── In-memory state ────────────────────────────────────────────────────────
@@ -228,25 +417,75 @@ let state = {
   brokerStatus: 'pending',  // ok | unreachable
   brokerError: null,
   alerts: [],          // last 40 events (failure + recovery)
-  healthSnapshot: { brokerDown: false, connectors: [], consumers: [] },
+  healthSnapshot: { brokerDown: false, connectors: [], pausedConnectors: [], stoppedConnectors: [], consumers: [], pipelineIssues: [] },
+  pipelineIssues: [],
   checkCount: 0,
   status: 'pending'    // pending | ok | alert | error
 };
 
+// Previous check snapshot for lag velocity + stuck offset detection
+let lagHistory = { lastCheckedAt: null, consumerGroups: {} };
+
 // ── Core: fetch brokers (detect if cluster/brokers are down) ───────────────
 async function fetchBrokers() {
-  return apiFetch(`${KAFKA_UI_URL}/api/clusters/${CLUSTER_NAME}/brokers`);
+  return apiFetch(`${KAFKA_UI_URL}/api/clusters/${clusterName}/brokers`);
 }
 
 // ── Core: fetch connectors ─────────────────────────────────────────────────
 async function fetchConnectors() {
-  return apiFetch(`${KAFKA_UI_URL}/api/clusters/${CLUSTER_NAME}/connectors`);
+  const raw = await apiFetch(`${KAFKA_UI_URL}/api/clusters/${clusterName}/connectors`);
+  return normalizeConnectors(raw);
+}
+
+function connectorClassName(c) {
+  return c.connectorClass || c.connector_class || '';
+}
+
+function connectorState(c) {
+  if (typeof c.status === 'string') return c.status;
+  return c.status?.state || 'UNKNOWN';
+}
+
+function connectorFailedTasks(c) {
+  return c.failedTasksCount ?? c.failed_tasks_count ?? 0;
+}
+
+function connectorTasksCount(c) {
+  return c.tasksCount ?? c.tasks_count ?? 0;
+}
+
+function connectorWorkerId(c) {
+  return c.status?.workerId ?? c.status?.worker_id ?? null;
+}
+
+function normalizeConnector(c) {
+  const state = connectorState(c);
+  const workerId = connectorWorkerId(c);
+  return {
+    ...c,
+    connector_class: connectorClassName(c),
+    connectorClass: connectorClassName(c),
+    tasks_count: connectorTasksCount(c),
+    tasksCount: connectorTasksCount(c),
+    failed_tasks_count: connectorFailedTasks(c),
+    failedTasksCount: connectorFailedTasks(c),
+    status: {
+      ...(typeof c.status === 'object' && c.status ? c.status : {}),
+      state,
+      worker_id: workerId,
+      workerId
+    }
+  };
+}
+
+function normalizeConnectors(list) {
+  return (Array.isArray(list) ? list : []).map(normalizeConnector);
 }
 
 // ── Debezium: cluster topics + connector config (expected capture topics) ─
 async function fetchAllTopicNames() {
   const perPage = 100;
-  const base = `${KAFKA_UI_URL}/api/clusters/${CLUSTER_NAME}/topics`;
+  const base = `${KAFKA_UI_URL}/api/clusters/${clusterName}/topics`;
   const first = await apiFetch(`${base}?page=0&perPage=${perPage}&showInternal=true`);
   const names = (first.topics || []).map(t => t.name);
   const totalPages = first.pageCount || 1;
@@ -260,7 +499,7 @@ async function fetchAllTopicNames() {
 async function fetchConnectorConfig(connectName, connectorName) {
   const cn = encodeURIComponent(connectName);
   const n = encodeURIComponent(connectorName);
-  return apiFetch(`${KAFKA_UI_URL}/api/clusters/${CLUSTER_NAME}/connects/${cn}/connectors/${n}/config`);
+  return apiFetch(`${KAFKA_UI_URL}/api/clusters/${clusterName}/connects/${cn}/connectors/${n}/config`);
 }
 
 function normalizeConnectorConfig(raw) {
@@ -277,7 +516,7 @@ function normalizeConnectorConfig(raw) {
 }
 
 function isDebeziumConnector(c) {
-  const cls = (c.connector_class || '').toLowerCase();
+  const cls = connectorClassName(c).toLowerCase();
   return cls.includes('debezium');
 }
 
@@ -453,14 +692,14 @@ async function enrichDebeziumTopicState(connectors, brokerOk) {
 async function fetchAllConsumerGroups() {
   const perPage = 100;
   const first = await apiFetch(
-    `${KAFKA_UI_URL}/api/clusters/${CLUSTER_NAME}/consumer-groups/paged?page=0&perPage=${perPage}&sortOrder=ASC`
+    `${KAFKA_UI_URL}/api/clusters/${clusterName}/consumer-groups/paged?page=0&perPage=${perPage}&sortOrder=ASC`
   );
   const groups = [...first.consumerGroups];
   const totalPages = first.pageCount || 1;
 
   for (let page = 1; page < totalPages; page++) {
     const data = await apiFetch(
-      `${KAFKA_UI_URL}/api/clusters/${CLUSTER_NAME}/consumer-groups/paged?page=${page}&perPage=${perPage}&sortOrder=ASC`
+      `${KAFKA_UI_URL}/api/clusters/${clusterName}/consumer-groups/paged?page=${page}&perPage=${perPage}&sortOrder=ASC`
     );
     groups.push(...data.consumerGroups);
   }
@@ -471,7 +710,7 @@ async function fetchAllConsumerGroups() {
 async function fetchConsumerGroupDetails(groupId) {
   try {
     return await apiFetch(
-      `${KAFKA_UI_URL}/api/clusters/${CLUSTER_NAME}/consumer-groups/${encodeURIComponent(groupId)}`
+      `${KAFKA_UI_URL}/api/clusters/${clusterName}/consumer-groups/${encodeURIComponent(groupId)}`
     );
   } catch (err) {
     console.warn(`[WARN] Could not fetch details for group ${groupId}: ${err.message}`);
@@ -514,6 +753,193 @@ function checkPartitionBalance(details) {
   return { balanced, min, max, distribution, byConsumer };
 }
 
+function connectorHealthCategory(c) {
+  const state = connectorState(c).toUpperCase();
+  if (connectorFailedTasks(c) > 0 || state === 'FAILED') return 'failed';
+  if (state === 'PAUSED') return 'paused';
+  if (state === 'STOPPED' || state === 'UNASSIGNED') return 'stopped';
+  if (state === 'RUNNING') return 'running';
+  return 'other';
+}
+
+function partitionKey(topic, partition) {
+  return `${topic}|${partition}`;
+}
+
+function analyzeConsumerLagSignals(g, details, checkedAt) {
+  const slo = sloForGroup(g.groupId);
+  g.lagSlo = slo;
+  g.sloBreached = g.consumerLag != null && g.consumerLag > slo;
+
+  const prev = lagHistory.consumerGroups[g.groupId];
+  g.lagDelta = null;
+  g.lagVelocity = null;
+  g.lagVelocityAlert = false;
+
+  if (prev && lagHistory.lastCheckedAt && g.consumerLag != null && prev.consumerLag != null) {
+    g.lagDelta = g.consumerLag - prev.consumerLag;
+    const mins = Math.max(1, (checkedAt.getTime() - new Date(lagHistory.lastCheckedAt).getTime()) / 60000);
+    g.lagVelocity = Math.round(g.lagDelta / mins);
+    g.lagVelocityAlert = g.lagDelta >= LAG_VELOCITY_THRESHOLD;
+  }
+
+  const stuckPartitions = [];
+  for (const p of details?.partitions || []) {
+    const lag = p.consumerLag ?? 0;
+    if (lag < STUCK_OFFSET_MIN_LAG || p.currentOffset == null) continue;
+    const key = partitionKey(p.topic, p.partition);
+    const prevPart = prev?.partitions?.[key];
+    let stuckChecks = 0;
+    if (prevPart && prevPart.currentOffset === p.currentOffset && prevPart.consumerLag >= STUCK_OFFSET_MIN_LAG) {
+      stuckChecks = (prevPart.stuckChecks || 1) + 1;
+    }
+    if (stuckChecks >= STUCK_OFFSET_CHECKS) {
+      stuckPartitions.push({
+        topic: p.topic,
+        partition: p.partition,
+        lag,
+        currentOffset: p.currentOffset,
+        stuckChecks
+      });
+    }
+  }
+  g.stuckPartitions = stuckPartitions;
+  g.stuckOffset = stuckPartitions.length > 0;
+}
+
+function updateLagHistory(consumerGroups, checkedAt) {
+  const next = { lastCheckedAt: checkedAt.toISOString(), consumerGroups: {} };
+  for (const g of consumerGroups) {
+    const partitions = {};
+    for (const p of g._detailPartitions || []) {
+      if (p.currentOffset == null) continue;
+      const key = partitionKey(p.topic, p.partition);
+      const prevPart = lagHistory.consumerGroups[g.groupId]?.partitions?.[key];
+      let stuckChecks = 0;
+      const lag = p.consumerLag ?? 0;
+      if (prevPart && prevPart.currentOffset === p.currentOffset && lag >= STUCK_OFFSET_MIN_LAG && prevPart.consumerLag >= STUCK_OFFSET_MIN_LAG) {
+        stuckChecks = (prevPart.stuckChecks || 1) + 1;
+      }
+      partitions[key] = { currentOffset: p.currentOffset, consumerLag: lag, stuckChecks };
+    }
+    next.consumerGroups[g.groupId] = {
+      consumerLag: g.consumerLag ?? 0,
+      partitions
+    };
+  }
+  lagHistory = next;
+}
+
+async function fetchTopicActiveProducers(topicName) {
+  try {
+    const data = await apiFetch(
+      `${KAFKA_UI_URL}/api/clusters/${clusterName}/topics/${encodeURIComponent(topicName)}/activeproducers`
+    );
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return null;
+  }
+}
+
+async function fetchTopicConsumerGroups(topicName) {
+  try {
+    const data = await apiFetch(
+      `${KAFKA_UI_URL}/api/clusters/${clusterName}/topics/${encodeURIComponent(topicName)}/consumer-groups`
+    );
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return null;
+  }
+}
+
+function isInternalTopic(name) {
+  return name.startsWith('__') || name.startsWith('_');
+}
+
+async function analyzePipelineTopics({ connectors, groupDetailsMap, clusterTopicSet }) {
+  const issues = [];
+  const consumedTopics = new Set();
+  const connectorTopics = new Set();
+
+  for (const details of Object.values(groupDetailsMap)) {
+    for (const p of details?.partitions || []) {
+      consumedTopics.add(p.topic);
+      if (clusterTopicSet && !clusterTopicSet.has(p.topic)) {
+        issues.push({
+          kind: 'missing_topic',
+          topic: p.topic,
+          groupId: details.groupId,
+          detail: 'Consumer group subscribed to a topic that does not exist in the cluster'
+        });
+      }
+    }
+  }
+
+  for (const c of connectors) {
+    for (const topic of c.topics || []) {
+      connectorTopics.add(topic);
+      if (clusterTopicSet && !clusterTopicSet.has(topic)) {
+        issues.push({
+          kind: 'missing_topic',
+          topic,
+          connector: c.name,
+          detail: 'Connector lists a topic that does not exist in the cluster'
+        });
+      } else if (!consumedTopics.has(topic)) {
+        issues.push({
+          kind: 'no_consumer',
+          topic,
+          connector: c.name,
+          detail: 'Connector output topic has no consuming consumer group'
+        });
+      }
+    }
+  }
+
+  if (ORPHAN_ZOMBIE_SCAN && clusterTopicSet) {
+    const candidates = [...clusterTopicSet]
+      .filter(t => !isInternalTopic(t))
+      .filter(t => !consumedTopics.has(t) && !connectorTopics.has(t))
+      .slice(0, ORPHAN_TOPIC_SCAN_LIMIT);
+
+    await Promise.all(candidates.map(async topic => {
+      const [producers, groups] = await Promise.all([
+        fetchTopicActiveProducers(topic),
+        fetchTopicConsumerGroups(topic)
+      ]);
+      if (producers === null && groups === null) return;
+      const hasProducers = (producers?.length ?? 0) > 0;
+      const hasConsumers = (groups?.length ?? 0) > 0;
+      if (!hasProducers && !hasConsumers) {
+        issues.push({
+          kind: 'zombie',
+          topic,
+          detail: 'Topic exists but has no active producers or consumer groups'
+        });
+      }
+    }));
+  }
+
+  const deduped = [];
+  const seen = new Set();
+  for (const issue of issues) {
+    const key = `${issue.kind}|${issue.topic}|${issue.groupId || ''}|${issue.connector || ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(issue);
+  }
+
+  return {
+    issues: deduped,
+    scannedAt: new Date().toISOString(),
+    zombieScanEnabled: ORPHAN_ZOMBIE_SCAN
+  };
+}
+
+function pipelineIssueKey(issue) {
+  return `${issue.kind}|${issue.topic}|${issue.groupId || ''}|${issue.connector || ''}`;
+}
+
 // ── Core: send Slack alert ─────────────────────────────────────────────────
 function pad(str, len) {
   return String(str).padEnd(len).slice(0, len);
@@ -554,20 +980,27 @@ function pushAlertEvent(event) {
 
 function connectorAlertRow(c, cols, withPause = true) {
   const name = c.name.length > cols.name ? c.name.slice(0, cols.name - 2) + '..' : c.name;
-  const status = (c.status?.state || 'UNKNOWN').slice(0, cols.status);
+  const status = (connectorState(c) || 'UNKNOWN').slice(0, cols.status);
   const connect = (c.connect || '-').length > cols.connect ? (c.connect || '-').slice(0, cols.connect - 2) + '..' : (c.connect || '-');
   const pause = withPause && cols.pause ? ` | ${pad(pauseColLabel(), cols.pause)}` : '';
-  return `| ${pad(name, cols.name)} | ${pad(status, cols.status)} | ${pad(String(c.failed_tasks_count ?? 0), cols.failed)} | ${pad(connect, cols.connect)}${pause} |`;
+  return `| ${pad(name, cols.name)} | ${pad(status, cols.status)} | ${pad(String(connectorFailedTasks(c)), cols.failed)} | ${pad(connect, cols.connect)}${pause} |`;
 }
 
 function consumerAlertRow(g, cols, withPause = true) {
   const groupId = g.groupId.length > cols.groupId ? g.groupId.slice(0, cols.groupId - 2) + '..' : g.groupId;
   const st = (g.state || '-').slice(0, cols.state);
   const members = String(g.members ?? 0);
-  const lag = (g.consumerLag != null && g.consumerLag > LAG_THRESHOLD) ? g.consumerLag.toLocaleString() : (g.consumerLag != null ? String(g.consumerLag) : '-');
+  const lag = (g.consumerLag != null && g.consumerLag > (g.lagSlo ?? LAG_THRESHOLD))
+    ? g.consumerLag.toLocaleString()
+    : (g.consumerLag != null ? String(g.consumerLag) : '-');
+  const flags = [
+    g.sloBreached ? 'SLO' : '',
+    g.stuckOffset ? 'stuck' : '',
+    g.lagVelocityAlert ? `+${g.lagDelta}` : ''
+  ].filter(Boolean).join(',') || 'ok';
   const balance = g.partitionUnbalanced
     ? (g.partitionBalance ? `${g.partitionBalance.min}-${g.partitionBalance.max}` : 'unbal')
-    : 'ok';
+    : flags.slice(0, 10);
   const pause = withPause && cols.pause ? ` | ${pad(pauseColLabel(), cols.pause)}` : '';
   return `| ${pad(groupId, cols.groupId)} | ${pad(st, cols.state)} | ${pad(members, cols.members)} | ${pad(lag, cols.lag)} | ${pad(balance, cols.balance)}${pause} |`;
 }
@@ -575,9 +1008,10 @@ function consumerAlertRow(g, cols, withPause = true) {
 function toConnectorAlertItem(c) {
   return {
     name: c.name,
-    state: c.status?.state,
+    state: connectorState(c),
+    healthCategory: connectorHealthCategory(c),
     connect: c.connect,
-    failedTasks: c.failed_tasks_count ?? 0
+    failedTasks: connectorFailedTasks(c)
   };
 }
 
@@ -587,9 +1021,24 @@ function toConsumerAlertItem(g) {
     state: g.state,
     members: g.members,
     consumerLag: g.consumerLag,
+    lagSlo: g.lagSlo,
+    sloBreached: g.sloBreached,
+    stuckOffset: g.stuckOffset,
+    lagVelocityAlert: g.lagVelocityAlert,
+    lagDelta: g.lagDelta,
     balance: g.partitionUnbalanced
       ? (g.partitionBalance ? `${g.partitionBalance.min}-${g.partitionBalance.max}` : 'unbal')
       : 'ok'
+  };
+}
+
+function toPipelineIssueItem(issue) {
+  return {
+    kind: issue.kind,
+    topic: issue.topic,
+    detail: issue.detail,
+    groupId: issue.groupId || null,
+    connector: issue.connector || null
   };
 }
 
@@ -602,20 +1051,28 @@ async function postSlack(text) {
   });
 }
 
-async function sendSlackFailureAlert({ brokerDown, failedConnectors, totalConnectors, unhealthyGroups }) {
+async function sendSlackFailureAlert({
+  brokerDown,
+  failedConnectors,
+  pausedConnectors,
+  stoppedConnectors,
+  totalConnectors,
+  unhealthyGroups,
+  pipelineIssues
+}) {
   const now = new Date().toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
   const lines = [];
 
   if (brokerDown) {
-    lines.push(`🔴 *Kafka Cluster Unreachable* — Could not reach brokers on \`${CLUSTER_NAME}\``);
+    lines.push(`🔴 *Kafka Cluster Unreachable* — Could not reach brokers on \`${clusterName}\``);
     lines.push(`_Checked at ${now}_`);
     lines.push(`_Error: ${state.brokerError || 'Unknown'}_`);
-    lines.push(`🔗 <${KAFKA_UI_URL}/ui/clusters/${CLUSTER_NAME}|View in Kafka UI>`);
+    lines.push(`🔗 <${KAFKA_UI_URL}/ui/clusters/${clusterName}|View in Kafbat UI>`);
     lines.push('');
   }
 
   if (failedConnectors.length > 0) {
-    lines.push(`🚨 *Kafka Connector Alert* — ${failedConnectors.length} of ${totalConnectors} failing on \`${CLUSTER_NAME}\``);
+    lines.push(`🚨 *Connector Failed* — ${failedConnectors.length} of ${totalConnectors} on \`${clusterName}\``);
     lines.push(`_Checked at ${now}_`);
     lines.push('');
     const cols = { name: 28, status: 14, failed: 8, connect: 36, pause: 14 };
@@ -626,23 +1083,47 @@ async function sendSlackFailureAlert({ brokerDown, failedConnectors, totalConnec
     for (const c of failedConnectors) lines.push(connectorAlertRow(c, cols));
     lines.push('```');
     appendPerRowPauseLines(lines, 'connector', failedConnectors, 'name');
-    lines.push(`🔗 <${KAFKA_UI_URL}/ui/clusters/${CLUSTER_NAME}/connectors|View Connectors>`);
+    lines.push(`🔗 <${KAFKA_UI_URL}/ui/clusters/${clusterName}/connectors|View Connectors>`);
+  }
+
+  if (pausedConnectors.length > 0) {
+    if (lines.length > 0) lines.push('');
+    lines.push(`⏸ *Connector Paused* — ${pausedConnectors.length} connector(s) on \`${clusterName}\``);
+    for (const c of pausedConnectors) lines.push(`• \`${c.name}\` (${c.connect || '—'})`);
+    appendPerRowPauseLines(lines, 'connector', pausedConnectors, 'name');
+  }
+
+  if (stoppedConnectors.length > 0) {
+    if (lines.length > 0) lines.push('');
+    lines.push(`⏹ *Connector Stopped* — ${stoppedConnectors.length} connector(s) on \`${clusterName}\``);
+    for (const c of stoppedConnectors) lines.push(`• \`${c.name}\` (${c.connect || '—'})`);
+    appendPerRowPauseLines(lines, 'connector', stoppedConnectors, 'name');
   }
 
   if (unhealthyGroups.length > 0) {
     if (lines.length > 0) lines.push('');
-    lines.push(`⚠️ *Kafka Consumer Alert* — ${unhealthyGroups.length} unhealthy group(s) on \`${CLUSTER_NAME}\``);
-    lines.push(`_Checked at ${now}_`);
+    lines.push(`⚠️ *Consumer Group Alert* — ${unhealthyGroups.length} unhealthy group(s) on \`${clusterName}\``);
+    lines.push(`_SLO / stuck offset / lag velocity flags in Balance column_`);
     lines.push('');
     const cols = { groupId: 34, state: 10, members: 8, lag: 12, balance: 10, pause: 14 };
     const sep = `|${'-'.repeat(cols.groupId + 2)}|${'-'.repeat(cols.state + 2)}|${'-'.repeat(cols.members + 2)}|${'-'.repeat(cols.lag + 2)}|${'-'.repeat(cols.balance + 2)}|${'-'.repeat(cols.pause + 2)}|`;
     lines.push('```');
-    lines.push(`| ${pad('Consumer Group', cols.groupId)} | ${pad('State', cols.state)} | ${pad('Members', cols.members)} | ${pad('Lag', cols.lag)} | ${pad('Balance', cols.balance)} | ${pad('Pause', cols.pause)} |`);
+    lines.push(`| ${pad('Consumer Group', cols.groupId)} | ${pad('State', cols.state)} | ${pad('Members', cols.members)} | ${pad('Lag', cols.lag)} | ${pad('Flags', cols.balance)} | ${pad('Pause', cols.pause)} |`);
     lines.push(sep);
     for (const g of unhealthyGroups) lines.push(consumerAlertRow(g, cols));
     lines.push('```');
     appendPerRowPauseLines(lines, 'consumer', unhealthyGroups, 'groupId');
-    lines.push(`🔗 <${KAFKA_UI_URL}/ui/clusters/${CLUSTER_NAME}/consumer-groups|View Consumer Groups>`);
+    lines.push(`🔗 <${KAFKA_UI_URL}/ui/clusters/${clusterName}/consumer-groups|View Consumer Groups>`);
+  }
+
+  if (pipelineIssues?.length > 0) {
+    if (lines.length > 0) lines.push('');
+    lines.push(`🧟 *Pipeline / Topic Issues* — ${pipelineIssues.length} on \`${clusterName}\``);
+    for (const issue of pipelineIssues.slice(0, 15)) {
+      const src = issue.groupId ? `cg: ${issue.groupId}` : issue.connector ? `connector: ${issue.connector}` : 'cluster';
+      lines.push(`• \`${issue.topic}\` _(${issue.kind})_ — ${issue.detail} [${src}]`);
+    }
+    if (pipelineIssues.length > 15) lines.push(`_…and ${pipelineIssues.length - 15} more_`);
   }
 
   if (lines.length) await postSlack(lines.join('\n'));
@@ -652,13 +1133,13 @@ async function sendSlackRecoveryAlert({ brokerRecovered, recoveredConnectors, re
   const now = new Date().toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
   const lines = [];
   const total = (brokerRecovered ? 1 : 0) + recoveredConnectors.length + recoveredConsumers.length;
-  lines.push(`✅ *Kafka Recovery* — ${total} item(s) healthy again on \`${CLUSTER_NAME}\``);
+  lines.push(`✅ *Kafka Recovery* — ${total} item(s) healthy again on \`${clusterName}\``);
   lines.push(`_Checked at ${now}_`);
   lines.push('');
 
   if (brokerRecovered) {
     lines.push('• *Cluster brokers* — reachable again');
-    lines.push(`🔗 <${KAFKA_UI_URL}/ui/clusters/${CLUSTER_NAME}|View in Kafka UI>`);
+    lines.push(`🔗 <${KAFKA_UI_URL}/ui/clusters/${clusterName}|View in Kafbat UI>`);
     lines.push('');
   }
 
@@ -682,7 +1163,7 @@ async function sendSlackRecoveryAlert({ brokerRecovered, recoveredConnectors, re
     lines.push(sep);
     for (const g of recoveredConsumers) lines.push(consumerAlertRow(g, cols, false));
     lines.push('```');
-    lines.push(`🔗 <${KAFKA_UI_URL}/ui/clusters/${CLUSTER_NAME}/consumer-groups|View Consumer Groups>`);
+    lines.push(`🔗 <${KAFKA_UI_URL}/ui/clusters/${clusterName}/consumer-groups|View Consumer Groups>`);
   }
 
   await postSlack(lines.join('\n'));
@@ -721,14 +1202,21 @@ async function runCheck() {
       console.error('[CONSUMER] Fetch failed:', consumerGroupsResult.reason?.message);
     }
 
-    await enrichDebeziumTopicState(connectors, state.brokerStatus === 'ok');
+    // Publish fetched data immediately so the dashboard is not blocked by Debezium / per-group detail calls
+    state.connectors = connectors;
+    state.consumerGroups = consumerGroups;
+    state.lastChecked = new Date().toISOString();
 
-    const failedConnectors = connectors.filter(
-      c => c.status?.state !== 'RUNNING' || c.failed_tasks_count > 0
-    );
+    try {
+      await enrichDebeziumTopicState(connectors, state.brokerStatus === 'ok');
+    } catch (err) {
+      console.warn('[DEBEZIUM] Enrichment failed:', err.message);
+    }
 
-    // Unhealthy: not STABLE, no members (but skip EMPTY groups with 0 topics as they may be unused),
-    // lag above threshold, or uneven partition distribution across members
+    const failedConnectors = connectors.filter(c => connectorHealthCategory(c) === 'failed');
+    const pausedConnectors = connectors.filter(c => connectorHealthCategory(c) === 'paused');
+    const stoppedConnectors = connectors.filter(c => connectorHealthCategory(c) === 'stopped');
+
     let unhealthyGroups = consumerGroups.filter(g => {
       const badState  = g.state !== 'STABLE' && !(g.state === 'EMPTY' && g.members === 0 && g.topics === 0);
       const noMembers = g.state === 'STABLE' && g.members === 0;
@@ -736,38 +1224,95 @@ async function runCheck() {
       return badState || noMembers || highLag;
     });
 
-    // Fetch details for STABLE groups with members (balance check + member/topic list)
-    const stableWithMembers = consumerGroups.filter(g => g.state === 'STABLE' && g.members >= 1);
-    for (const g of stableWithMembers) {
+    const checkedAt = new Date();
+    const groupDetailsMap = {};
+    const groupsNeedingDetails = consumerGroups.filter(
+      g => g.state === 'STABLE' && g.members >= 1
+    );
+
+    await Promise.all(groupsNeedingDetails.map(async g => {
       const details = await fetchConsumerGroupDetails(g.groupId);
-      if (details) {
-        g.memberAssignments = buildMemberAssignments(details);
-        if (CHECK_BALANCE && g.members > 1) {
-          const balance = checkPartitionBalance(details);
-          g.partitionBalance = balance;
-          if (!balance.balanced) {
-            const existing = unhealthyGroups.find(u => u.groupId === g.groupId);
-            if (existing) existing.partitionUnbalanced = true;
-            else unhealthyGroups = [...unhealthyGroups, { ...g, partitionUnbalanced: true }];
-          }
+      if (!details) return;
+      groupDetailsMap[g.groupId] = details;
+      g._detailPartitions = details.partitions || [];
+      g.memberAssignments = buildMemberAssignments(details);
+      analyzeConsumerLagSignals(g, details, checkedAt);
+
+      if (g.sloBreached || g.stuckOffset || g.lagVelocityAlert) {
+        const existing = unhealthyGroups.find(u => u.groupId === g.groupId);
+        if (!existing) unhealthyGroups = [...unhealthyGroups, g];
+      }
+
+      if (CHECK_BALANCE && g.members > 1) {
+        const balance = checkPartitionBalance(details);
+        g.partitionBalance = balance;
+        if (!balance.balanced) {
+          const existing = unhealthyGroups.find(u => u.groupId === g.groupId);
+          if (existing) existing.partitionUnbalanced = true;
+          else unhealthyGroups = [...unhealthyGroups, { ...g, partitionUnbalanced: true }];
         }
+      }
+    }));
+
+    let pipelineResult = { issues: [], scannedAt: null, zombieScanEnabled: ORPHAN_ZOMBIE_SCAN };
+    if (CHECK_ORPHAN_TOPICS && state.brokerStatus === 'ok') {
+      try {
+        let clusterTopicSet = null;
+        try {
+          const names = await fetchAllTopicNames();
+          clusterTopicSet = new Set(names);
+        } catch (err) {
+          console.warn('[ORPHAN] Could not load cluster topics:', err.message);
+        }
+        pipelineResult = await analyzePipelineTopics({ connectors, groupDetailsMap, clusterTopicSet });
+      } catch (err) {
+        console.warn('[ORPHAN] Pipeline analysis failed:', err.message);
       }
     }
 
-    state.lastChecked   = new Date().toISOString();
+    updateLagHistory(consumerGroups, checkedAt);
+
+    state.lastChecked   = checkedAt.toISOString();
     state.connectors    = connectors;
     state.consumerGroups = consumerGroups;
+    state.pipelineIssues = pipelineResult.issues;
+
     const brokerDown = state.brokerStatus === 'unreachable';
-    state.status        = (brokerDown || failedConnectors.length > 0 || unhealthyGroups.length > 0) ? 'alert' : 'ok';
+    const hasPipelineIssues = pipelineResult.issues.length > 0;
+    state.status = (
+      brokerDown ||
+      failedConnectors.length > 0 ||
+      pausedConnectors.length > 0 ||
+      stoppedConnectors.length > 0 ||
+      unhealthyGroups.length > 0 ||
+      hasPipelineIssues
+    ) ? 'alert' : 'ok';
 
     const toAlertConns = failedConnectors.filter(c => !isAcknowledged('connector', c.name));
+    const toAlertPaused = pausedConnectors.filter(c => !isAcknowledged('connector', c.name));
+    const toAlertStopped = stoppedConnectors.filter(c => !isAcknowledged('connector', c.name));
     const toAlertCons  = unhealthyGroups.filter(g => !isAcknowledged('consumer', g.groupId));
+    const toAlertPipeline = pipelineResult.issues;
 
-    const prev = state.healthSnapshot || { brokerDown: false, connectors: [], consumers: [] };
+    const prev = state.healthSnapshot || {
+      brokerDown: false,
+      connectors: [],
+      pausedConnectors: [],
+      stoppedConnectors: [],
+      consumers: [],
+      pipelineIssues: []
+    };
     const curConnNames = failedConnectors.map(c => c.name);
+    const curPausedNames = pausedConnectors.map(c => c.name);
+    const curStoppedNames = stoppedConnectors.map(c => c.name);
     const curConsIds = unhealthyGroups.map(g => g.groupId);
+    const curPipelineKeys = pipelineResult.issues.map(pipelineIssueKey);
+
     const recoveredConnectorNames = prev.connectors.filter(n => !curConnNames.includes(n));
+    const recoveredPausedNames = prev.pausedConnectors.filter(n => !curPausedNames.includes(n));
+    const recoveredStoppedNames = prev.stoppedConnectors.filter(n => !curStoppedNames.includes(n));
     const recoveredConsumerIds = prev.consumers.filter(id => !curConsIds.includes(id));
+    const recoveredPipelineKeys = (prev.pipelineIssues || []).filter(k => !curPipelineKeys.includes(k));
     const brokerRecovered = prev.brokerDown && !brokerDown;
 
     const recoveredConnectors = recoveredConnectorNames.map(name => {
@@ -779,24 +1324,42 @@ async function runCheck() {
       return g || { groupId: id, state: 'STABLE', members: 0, consumerLag: 0 };
     });
 
-    const hasFailureAlert = brokerDown || toAlertConns.length > 0 || toAlertCons.length > 0;
-    const hasRecovery = brokerRecovered || recoveredConnectors.length > 0 || recoveredConsumers.length > 0;
+    const hasFailureAlert = brokerDown ||
+      toAlertConns.length > 0 ||
+      toAlertPaused.length > 0 ||
+      toAlertStopped.length > 0 ||
+      toAlertCons.length > 0 ||
+      toAlertPipeline.length > 0;
+    const hasRecovery = brokerRecovered ||
+      recoveredConnectors.length > 0 ||
+      recoveredPausedNames.length > 0 ||
+      recoveredStoppedNames.length > 0 ||
+      recoveredConsumers.length > 0 ||
+      recoveredPipelineKeys.length > 0;
 
     if (hasFailureAlert) {
       await sendSlackFailureAlert({
         brokerDown,
         failedConnectors: toAlertConns,
+        pausedConnectors: toAlertPaused,
+        stoppedConnectors: toAlertStopped,
         totalConnectors: connectors.length,
-        unhealthyGroups: toAlertCons
+        unhealthyGroups: toAlertCons,
+        pipelineIssues: toAlertPipeline
       });
       pushAlertEvent({
         kind: 'failure',
         time: state.lastChecked,
         brokerDown: brokerDown ? 1 : 0,
-        connectors: toAlertConns.map(toConnectorAlertItem),
-        consumers: toAlertCons.map(toConsumerAlertItem)
+        connectors: [...toAlertConns, ...toAlertPaused, ...toAlertStopped].map(toConnectorAlertItem),
+        consumers: toAlertCons.map(toConsumerAlertItem),
+        pipelineIssues: toAlertPipeline.map(toPipelineIssueItem)
       });
-      console.log(`[ALERT] ${brokerDown ? 'Broker unreachable | ' : ''}Connectors: ${toAlertConns.length} failing | Consumers: ${toAlertCons.length} unhealthy`);
+      console.log(
+        `[ALERT] ${brokerDown ? 'Broker unreachable | ' : ''}` +
+        `Failed: ${toAlertConns.length} | Paused: ${toAlertPaused.length} | Stopped: ${toAlertStopped.length} | ` +
+        `Consumers: ${toAlertCons.length} | Pipeline: ${toAlertPipeline.length}`
+      );
     }
 
     if (hasRecovery) {
@@ -814,11 +1377,17 @@ async function runCheck() {
     state.healthSnapshot = {
       brokerDown,
       connectors: curConnNames,
-      consumers: curConsIds
+      pausedConnectors: curPausedNames,
+      stoppedConnectors: curStoppedNames,
+      consumers: curConsIds,
+      pipelineIssues: curPipelineKeys
     };
 
     if (!hasFailureAlert && !hasRecovery) {
-      console.log(`[OK] Brokers: ${state.brokers?.length ?? 0} | ${connectors.length} connectors | ${consumerGroups.length} consumer groups — all healthy.`);
+      console.log(
+        `[OK] Brokers: ${state.brokers?.length ?? 0} | ${connectors.length} connectors | ` +
+        `${consumerGroups.length} consumer groups | Pipeline issues: ${pipelineResult.issues.length}`
+      );
     }
   } catch (err) {
     state.status = 'error';
@@ -896,24 +1465,30 @@ app.get('/api/status', (req, res) => {
     lastChecked:    state.lastChecked,
     checkCount:     state.checkCount,
     status:         state.status,
-    cluster:        CLUSTER_NAME,
+    cluster:        clusterName,
     kafkaUiUrl:     KAFKA_UI_URL,
+    kafbatAuthType: kafbatAuthType,
     lagThreshold:   LAG_THRESHOLD,
+    lagVelocityThreshold: LAG_VELOCITY_THRESHOLD,
     checkDebeziumTopics: CHECK_DEBEZIUM_TOPICS,
     checkPartitionBalance: CHECK_BALANCE,
+    checkOrphanTopics: CHECK_ORPHAN_TOPICS,
+    orphanZombieScan: ORPHAN_ZOMBIE_SCAN,
     acks,
     brokers:        state.brokers,
     brokerStatus:   state.brokerStatus,
     brokerError:    state.brokerError,
+    pipelineIssues: state.pipelineIssues,
     connectors: state.connectors.map(c => ({
       name:        c.name,
       connect:     c.connect,
       type:        c.type,
-      connectorClass: c.connector_class,
-      state:       c.status?.state,
-      tasksCount:  c.tasks_count,
-      failedTasks: c.failed_tasks_count,
-      workerId:    c.status?.worker_id,
+      connectorClass: connectorClassName(c),
+      state:       connectorState(c),
+      healthCategory: connectorHealthCategory(c),
+      tasksCount:  connectorTasksCount(c),
+      failedTasks: connectorFailedTasks(c),
+      workerId:    connectorWorkerId(c),
       acknowledged: isAcknowledged('connector', c.name),
       debeziumTopics: c.debeziumTopicVerification || null
     })),
@@ -923,6 +1498,13 @@ app.get('/api/status', (req, res) => {
       members:         g.members,
       topics:          g.topics,
       consumerLag:     g.consumerLag,
+      lagSlo:          g.lagSlo,
+      sloBreached:     g.sloBreached,
+      lagDelta:        g.lagDelta,
+      lagVelocity:     g.lagVelocity,
+      lagVelocityAlert: g.lagVelocityAlert,
+      stuckOffset:     g.stuckOffset,
+      stuckPartitions: g.stuckPartitions,
       partitionBalance: g.partitionBalance,
       partitionUnbalanced: g.partitionUnbalanced,
       memberAssignments: g.memberAssignments,
@@ -994,7 +1576,17 @@ if (UI_PASSWORD) console.log('[AUTH] UI password protection enabled.');
 else console.log('[AUTH] UI password protection disabled (set UI_PASSWORD to enable).');
 
 // ── Start ──────────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`Kafka Monitor running on port ${PORT}`);
-  runCheck();
+  console.log(`Kafbat UI: ${KAFKA_UI_URL} (cluster: ${clusterName})`);
+  try {
+    await initKafbatAuth();
+    await initKafbatCluster();
+    await runCheck();
+  } catch (err) {
+    console.error('[STARTUP]', err.message);
+    state.status = 'error';
+    state.brokerError = err.message;
+    state.lastChecked = new Date().toISOString();
+  }
 });
