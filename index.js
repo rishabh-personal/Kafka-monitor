@@ -940,6 +940,27 @@ function pipelineIssueKey(issue) {
   return `${issue.kind}|${issue.topic}|${issue.groupId || ''}|${issue.connector || ''}`;
 }
 
+function csvEscape(val) {
+  const s = String(val ?? '');
+  if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+function pipelineIssuesToCsv(issues, cluster, exportedAt) {
+  const headers = ['kind', 'topic', 'detail', 'consumer_group', 'connector', 'cluster', 'exported_at'];
+  const at = exportedAt || new Date().toISOString();
+  const rows = (issues || []).map(i => [
+    csvEscape(i.kind),
+    csvEscape(i.topic),
+    csvEscape(i.detail),
+    csvEscape(i.groupId || ''),
+    csvEscape(i.connector || ''),
+    csvEscape(cluster),
+    csvEscape(at)
+  ].join(','));
+  return [headers.join(','), ...rows].join('\r\n');
+}
+
 // ── Core: send Slack alert ─────────────────────────────────────────────────
 function pad(str, len) {
   return String(str).padEnd(len).slice(0, len);
@@ -1512,6 +1533,16 @@ app.get('/api/status', (req, res) => {
     })),
     alerts: state.alerts
   });
+});
+
+app.get('/api/pipeline-issues/export.csv', (req, res) => {
+  const exportedAt = new Date().toISOString();
+  const csv = pipelineIssuesToCsv(state.pipelineIssues, clusterName, exportedAt);
+  const safeCluster = clusterName.replace(/[^\w.-]+/g, '_');
+  const filename = `pipeline-issues-${safeCluster}-${exportedAt.slice(0, 10)}.csv`;
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send('\uFEFF' + csv);
 });
 
 // On-demand: fetch consumer group details (member list + topic assignments)

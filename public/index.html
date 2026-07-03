@@ -703,6 +703,16 @@
     .pipeline-kind.missing_topic { color: var(--danger); }
     .pipeline-kind.no_consumer { color: var(--accent); }
 
+    .pipeline-section-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+    }
+    .pipeline-section-head .section-head { margin-bottom: 0; flex: 1; min-width: 200px; }
+
     .badge.paused { background: var(--warning-bg); color: var(--warning); border-color: color-mix(in srgb, var(--warning) 20%, transparent); }
     .badge.stopped { background: var(--bg-elevated); color: var(--text-muted); border-color: var(--border); }
 
@@ -1009,9 +1019,12 @@
 </section>
 
 <section class="content-section" id="pipeline-section">
-  <div class="section-head">
-    <h2>Pipeline &amp; Topic Issues</h2>
-    <p class="section-desc">Orphan topics, missing topics, and connector output without consumers</p>
+  <div class="pipeline-section-head">
+    <div class="section-head">
+      <h2>Pipeline &amp; Topic Issues</h2>
+      <p class="section-desc">Orphan topics, missing topics, and connector output without consumers</p>
+    </div>
+    <button type="button" class="btn btn-ghost" id="pipeline-export-csv" onclick="exportPipelineIssuesCsv()" disabled title="Download current issues as CSV">Export CSV</button>
   </div>
   <div id="pipeline-issues-card" class="card panel-card">
     <div class="empty">Loading…</div>
@@ -1721,9 +1734,38 @@
   }
 
   // ── main render ────────────────────────────────────────────────────────────
+  async function exportPipelineIssuesCsv() {
+    const btn = document.getElementById('pipeline-export-csv');
+    if (btn) btn.disabled = true;
+    try {
+      const res = await fetch('/api/pipeline-issues/export.csv');
+      if (res.status === 401) { window.location.href = '/login'; return; }
+      if (!res.ok) throw new Error(`Export failed (${res.status})`);
+      const blob = await res.blob();
+      const disposition = res.headers.get('Content-Disposition') || '';
+      const match = disposition.match(/filename="([^"]+)"/);
+      const filename = match ? match[1] : `pipeline-issues-${new Date().toISOString().slice(0, 10)}.csv`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert(e.message || 'Could not export CSV');
+    } finally {
+      if (btn && _data?.checkOrphanTopics !== false) btn.disabled = false;
+    }
+  }
+
   function renderPipelineIssues(data) {
     const card = document.getElementById('pipeline-issues-card');
+    const exportBtn = document.getElementById('pipeline-export-csv');
     const issues = data.pipelineIssues || [];
+    const canExport = data.checkOrphanTopics !== false;
+    if (exportBtn) exportBtn.disabled = !canExport;
     if (!issues.length) {
       card.className = 'card panel-card';
       card.innerHTML = `<div class="empty">${data.checkOrphanTopics === false ? 'Pipeline checks disabled.' : 'No pipeline or topic issues detected.'}</div>`;
